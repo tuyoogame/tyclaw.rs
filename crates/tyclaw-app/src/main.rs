@@ -42,14 +42,6 @@ struct DingTalkConfig {
     client_secret: Option<String>,
     /// Gateway WebSocket URL（如 "ws://gateway-host:9100"）。不配则直连钉钉 Stream API。
     gateway_url: Option<String>,
-    #[serde(default = "default_workspace_id")]
-    workspace_id: String,
-    #[serde(default)]
-    routes: HashMap<String, String>,
-}
-
-fn default_workspace_id() -> String {
-    "default".into()
 }
 
 fn print_effective_config(
@@ -134,8 +126,6 @@ fn print_effective_config(
                 .as_deref()
                 .unwrap_or("<none, direct stream>")
         );
-        println!("dingtalk.workspace_id: {}", dingtalk.workspace_id);
-        println!("dingtalk.routes.count: {}", dingtalk.routes.len());
     }
     println!("subtasks.enabled: {}", subtasks.enabled);
     if subtasks.enabled {
@@ -265,25 +255,62 @@ async fn main() {
 
     info!(?config_path, "Loaded config (or defaults)");
 
-    // 配置优先级：命令行参数 > 环境变量 > config.yaml > 默认值
-    let _api_key_from_cli_or_env = args.api_key.is_some();
-    let api_key = args.api_key.or(cfg.llm.api_key).unwrap_or_else(|| {
-        eprintln!(
-            "Error: API key required.\n\
-             Set in config.yaml (llm.api_key), --api-key flag, or OPENAI_API_KEY env var."
-        );
-        std::process::exit(1);
-    });
-
-    let api_base = args
-        .api_base
-        .or(cfg.llm.api_base)
-        .unwrap_or_else(|| "https://api.openai.com/v1".into());
-
-    let model = args
-        .model
-        .or(cfg.llm.model)
-        .unwrap_or_else(|| "gpt-4o".into());
+    // 配置优先级：命令行参数 > 环境变量 > providers[name] > llm 内联字段 > 默认值
+    //
+    // 新格式（推荐）：llm.provider 引用全局 providers 中的名字
+    // 旧格式（兼容）：llm.api_key / api_base / model 内联
+    let (api_key, api_base, model, thinking) =
+        if let Some(ref provider_name) = args.api_key.as_ref().map(|_| None::<String>).unwrap_or(cfg.llm.provider.clone()) {
+            // 新格式：从全局 providers 解析
+            let pcfg = cfg.providers.get(provider_name).unwrap_or_else(|| {
+                eprintln!(
+                    "Error: llm.provider = \"{provider_name}\" not found in [providers] section.\n\
+                     Available providers: {:?}",
+                    cfg.providers.keys().collect::<Vec<_>>()
+                );
+                std::process::exit(1);
+            });
+            let api_key = pcfg.api_key.clone().unwrap_or_else(|| {
+                eprintln!("Error: providers.{provider_name}.api_key is required.");
+                std::process::exit(1);
+            });
+            let model = pcfg.model.clone().unwrap_or_else(|| provider_name.clone());
+            let thinking = if pcfg.thinking_enabled {
+                Some(tyclaw_provider::ThinkingConfig {
+                    effort: pcfg.thinking_effort.clone(),
+                    budget_tokens: pcfg.thinking_budget_tokens,
+                })
+            } else {
+                None
+            };
+            (api_key, pcfg.endpoint.clone(), model, thinking)
+        } else {
+            // 旧格式 / CLI 覆盖：内联 api_key / api_base / model
+            let api_key = args.api_key.or(cfg.llm.api_key).unwrap_or_else(|| {
+                eprintln!(
+                    "Error: API key required.\n\
+                     Set llm.provider (recommended), llm.api_key, --api-key flag, or OPENAI_API_KEY env var."
+                );
+                std::process::exit(1);
+            });
+            let api_base = args
+                .api_base
+                .or(cfg.llm.api_base)
+                .unwrap_or_else(|| "https://api.openai.com/v1".into());
+            let model = args
+                .model
+                .or(cfg.llm.model)
+                .unwrap_or_else(|| "gpt-4o".into());
+            let thinking = if cfg.llm.thinking_enabled {
+                Some(tyclaw_provider::ThinkingConfig {
+                    effort: cfg.llm.thinking_effort.clone(),
+                    budget_tokens: cfg.llm.thinking_budget_tokens,
+                })
+            } else {
+                None
+            };
+            (api_key, api_base, model, thinking)
+        };
 
     let max_iterations = args.max_iterations.unwrap_or(cfg.llm.max_iterations);
     let context_window = args.context_window_tokens.or(cfg.llm.context_window_tokens);
@@ -313,15 +340,7 @@ async fn main() {
         "Starting TyClaw.rs"
     );
 
-    // 创建 LLM 提供者（Arc 共享给 Orchestrator 和 AgentLoop）
-    let thinking = if cfg.llm.thinking_enabled {
-        Some(tyclaw_provider::ThinkingConfig {
-            effort: cfg.llm.thinking_effort.clone(),
-            budget_tokens: cfg.llm.thinking_budget_tokens,
-        })
-    } else {
-        None
-    };
+    // 创建主控 LLM 提供者（Arc 共享给 Orchestrator 和 AgentLoop）
     let mut provider_impl = OpenAICompatProvider::new(&api_key, &api_base, &model, thinking);
     provider_impl.set_snapshot_dir(
         workspace_root
@@ -340,7 +359,14 @@ async fn main() {
         context_window,
         write_snapshot: snapshot,
         workspaces: cfg.workspaces,
-        subtasks_config: cfg.subtasks,
+        subtasks_config: {
+            // 将全局 providers 合并到 subtasks.providers（全局为底，subtasks 局部覆盖）
+            let mut sc = cfg.subtasks;
+            for (name, pcfg) in &cfg.providers {
+                sc.providers.entry(name.clone()).or_insert_with(|| pcfg.clone());
+            }
+            sc
+        },
         web_search_config: cfg.web_search,
         control_config: cfg.control,
         workspace_config: cfg.workspace,
@@ -524,7 +550,11 @@ async fn run_outbound_dispatcher(
                         eprintln!("\n\x1b[31m[DT:{chat_id}] Error: {message}\x1b[0m\n");
                     }
                     OutboundEvent::Progress { message, .. } => {
-                        println!("\x1b[2m[DT:{chat_id}] {message}\x1b[0m");
+                        if message.contains("[sandbox]") || message.contains("[已创建任务") {
+                            println!("\x1b[32m[DT:{chat_id}] {message}\x1b[0m");
+                        } else {
+                            println!("\x1b[2m[DT:{chat_id}] {message}\x1b[0m");
+                        }
                     }
                     OutboundEvent::Thinking { content, .. } => {
                         println!("\x1b[2m[DT:{chat_id}] [Thinking] {content}\x1b[0m");
@@ -629,8 +659,6 @@ async fn run_hybrid(config: RunConfig, dt_config: DingTalkConfig) {
         client_id,
         client_secret,
         gateway_url,
-        workspace_id,
-        routes,
     } = dt_config;
 
     let client_id = client_id.unwrap_or_else(|| {
@@ -702,8 +730,6 @@ async fn run_hybrid(config: RunConfig, dt_config: DingTalkConfig) {
         token_manager,
         &client_id,
         workspace_path,
-        workspace_id,
-        routes,
     );
 
     if let Some(gw_url) = gateway_url {

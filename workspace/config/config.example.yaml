@@ -3,62 +3,119 @@
 # 使用方式：复制为 config.yaml，填入实际值即可
 #   cp config.example.yaml config.yaml
 #
-# 优先级：命令行参数 > 环境变量 (OPENAI_API_KEY, OPENAI_API_BASE) > config.yaml > 默认值
+# 优先级：命令行参数 > 环境变量 > providers[name] > llm 内联字段 > 默认值
 #
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║  本文件提供两种接入模式，任选其一：                                  ║
+# ║  设计理念：                                                         ║
 # ║                                                                      ║
-# ║  【代理模式】所有请求经统一中转网关（如 relay.tuyoo.com），          ║
-# ║              一个 Key 调用所有模型，适合企业内网/统一计费 / 合规审计 ║
+# ║  所有模型在 [providers] 统一定义，每个模型自由选择直连或代理。       ║
+# ║  主控 LLM 和子任务引擎只需引用 provider 名字。                      ║
 # ║                                                                      ║
-# ║  【直连模式】直接连各 LLM Provider 的官方 API，                      ║
-# ║              各模型独立配 Key，适合个人开发 / 海外部署 / 本地模型    ║
+# ║  【代理模式】endpoint 指向统一中转网关（如 relay.tuyoo.com）         ║
+# ║  【直连模式】endpoint 指向各 Provider 官方 API                       ║
+# ║  【混合模式】部分走代理、部分直连，按需配置                          ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 # ============================================================================
-# 主控 LLM
+# 全局 Provider 定义 —— 每个模型独立配置，自由选择直连或代理
 # ============================================================================
-llm:
-  # ---------- 代理模式（默认）----------
-  api_key: "YOUR_RELAY_KEY"
-  api_base: "https://relay.tuyoo.com/v1/"
-  model: "openai/gpt-5.4"
-  # model: "openai/claude-opus-4.6"       # 切换主控模型只需改这一行
+providers:
+  # --- GPT (代理模式示例) ---
+  gpt:
+    endpoint: "https://relay.tuyoo.com/v1"
+    api_key: "YOUR_RELAY_KEY"
+    model: "openai/gpt-5.4"
+    max_tokens: 65536
 
-  # ---------- 直连模式（取消注释替换上方）----------
-  # --- OpenAI 直连 ---
-  # api_key: "sk-your-openai-key"
-  # api_base: "https://api.openai.com/v1"
-  # model: "gpt-5.4"                      # 或 "gpt-4o"、"o3" 等
+  # --- GPT (直连模式示例，取消注释替换上方) ---
+  # gpt:
+  #   endpoint: "https://api.openai.com/v1"
+  #   api_key: "sk-your-openai-key"
+  #   model: "gpt-5.4"
+  #   max_tokens: 65536
 
-  # --- Anthropic 直连 ---
-  # api_key: "sk-ant-your-anthropic-key"
-  # api_base: "https://api.anthropic.com/v1"
-  # model: "claude-sonnet-4-20250514"     # 或 "claude-opus-4-20250514"
-  # thinking_enabled: true
-  # thinking_effort: "high"
+  # --- Claude Opus (代理模式) ---
+  claude-opus:
+    endpoint: "https://relay.tuyoo.com/v1"
+    api_key: "YOUR_RELAY_KEY"
+    model: "openai/claude-opus-4.6"
+    max_tokens: 65536
+    thinking_enabled: true
+    thinking_effort: "high"
+
+  # --- Claude Opus (直连模式，取消注释替换上方) ---
+  # claude-opus:
+  #   endpoint: "https://api.anthropic.com/v1"
+  #   api_key: "sk-ant-your-anthropic-key"
+  #   model: "claude-opus-4-20250514"
+  #   max_tokens: 65536
+  #   thinking_enabled: true
+  #   thinking_effort: "high"
+
+  # --- Gemini Pro ---
+  gemini-pro:
+    endpoint: "https://relay.tuyoo.com/v1"
+    api_key: "YOUR_RELAY_KEY"
+    model: "openai/gemini-3.1-pro-preview"
+    max_tokens: 65536
+
+  # --- Kimi ---
+  kimi:
+    endpoint: "https://relay.tuyoo.com/v1"
+    api_key: "YOUR_RELAY_KEY"
+    model: "openai/kimi-k2.5"
+    max_tokens: 65536
+
+  # --- GLM ---
+  glm:
+    endpoint: "https://relay.tuyoo.com/v1"
+    api_key: "YOUR_RELAY_KEY"
+    model: "openai/glm-5"
+    max_tokens: 65536
+
+  # --- MiniMax ---
+  minimax:
+    endpoint: "https://relay.tuyoo.com/v1"
+    api_key: "YOUR_RELAY_KEY"
+    model: "openai/minimax-m2.5"
+    max_tokens: 65536
+
+  # --- 本地模型（Ollama / vLLM / LiteLLM 等）---
+  # local:
+  #   endpoint: "http://localhost:11434/v1"
+  #   api_key: "not-needed"
+  #   model: "llama3"
+  #   max_tokens: 4096
 
   # --- OpenRouter（聚合多家模型，一个 Key 调所有）---
-  # api_key: "sk-or-your-openrouter-key"
-  # api_base: "https://openrouter.ai/api/v1"
-  # model: "anthropic/claude-sonnet-4"
+  # openrouter-claude:
+  #   endpoint: "https://openrouter.ai/api/v1"
+  #   api_key: "sk-or-your-openrouter-key"
+  #   model: "anthropic/claude-sonnet-4"
+  #   max_tokens: 16384
 
   # --- Azure OpenAI ---
-  # api_key: "your-azure-key"
-  # api_base: "https://your-resource.openai.azure.com/openai/deployments/gpt-5.4/v1"
-  # model: "gpt-5.4"
+  # azure-gpt:
+  #   endpoint: "https://your-resource.openai.azure.com/openai/deployments/gpt-5.4/v1"
+  #   api_key: "your-azure-key"
+  #   model: "gpt-5.4"
+  #   max_tokens: 16384
 
-  # --- 本地模型（Ollama / vLLM / LiteLLM 等，兼容 OpenAI 格式即可）---
-  # api_key: "not-needed"
-  # api_base: "http://localhost:11434/v1"
-  # model: "llama3"
-  # context_window_tokens: 8000
-
+# ============================================================================
+# 主控 LLM —— 引用 providers 中的名字
+# ============================================================================
+llm:
+  provider: "gpt"                         # 引用上方 providers.gpt
   max_iterations: 99                      # Agent 最大迭代次数
   context_window_tokens: 200000           # 上下文窗口（token），按模型能力配置
   snapshot: false                          # 是否保存对话快照
-  thinking_enabled: false                 # Claude 风格 thinking（GPT 主控时关闭）
-  thinking_effort: "high"                 # 仅 thinking_enabled=true 时生效
+
+  # 也支持内联配置（兼容旧格式，不设 provider 时生效）：
+  # api_key: "sk-your-key"
+  # api_base: "https://api.openai.com/v1"
+  # model: "gpt-5.4"
+  # thinking_enabled: false
+  # thinking_effort: "high"
 
 # ============================================================================
 # Workspace
@@ -73,35 +130,29 @@ workspace:
 # dingtalk:
 #   client_id: "YOUR_DINGTALK_APP_KEY"
 #   client_secret: "YOUR_DINGTALK_APP_SECRET"
-#   workspace_id: "game.main"             # 默认 workspace（未命中 routes 时使用）
-#   routes:                               # conversation_id -> workspace_id（群级路由）
-#     "cid_game_code_group": "game.code"
-#     "cid_game_data_group": "game.data"
 
 # ============================================================================
-# 子任务引擎 —— 多模型并行（可选）
+# 子任务引擎 —— 多模型并行
 #
-#   代理模式：所有 provider 指向同一 relay，用 model 字段区分模型
-#   直连模式：各 provider 填各自的 endpoint 和 api_key
+# routing_rules 和 planner_model / reducer_model 直接引用 providers 中的名字。
+# 无需在此重复定义 providers（全局 providers 会自动合并进来）。
 # ============================================================================
 subtasks:
   enabled: true
+  planner_model: "gpt"                    # 任务分解/规划
+  planner_thinking_enabled: true
+  planner_thinking_effort: "high"
+  reducer_model: "gpt"                    # 结果合并
+  default_model: "gpt"                    # 无规则匹配时的默认模型
   max_concurrency: 4
   failure_policy: "best_effort"           # best_effort | fail_fast
-  default_timeout_ms: 600000              # 10 分钟，coding 任务需要较长时间
+  default_timeout_ms: 600000              # 10 分钟
 
   # canonical node_type:
   #   coding / reasoning / search / review / summarize / planning / general
   # compatibility aliases:
   #   coding_deep -> coding, analysis/synthesis -> reasoning,
   #   research -> search, critique -> review, design -> planning
-
-  # ---------- 代理模式：多模型经 relay 中转 ----------
-  planner_model: "gpt"
-  planner_thinking_enabled: true
-  planner_thinking_effort: "high"
-  reducer_model: "gpt"
-  default_model: "gpt"
   routing_rules:
     - node_type_pattern: "coding*"
       target_model: "claude-opus"
@@ -125,79 +176,15 @@ subtasks:
       target_model: "gemini-pro"
     - node_type_pattern: "research"
       target_model: "gemini-pro"
-  providers:
-    claude-opus:
-      endpoint: "https://relay.tuyoo.com/v1"
-      api_key: "YOUR_RELAY_KEY"
-      model: "openai/claude-opus-4.6"
-      max_tokens: 65536
-      thinking_enabled: true
-      thinking_effort: "high"
-    gpt:
-      endpoint: "https://relay.tuyoo.com/v1"
-      api_key: "YOUR_RELAY_KEY"
-      model: "openai/gpt-5.4"
-      max_tokens: 65536
-    gemini-pro:
-      endpoint: "https://relay.tuyoo.com/v1"
-      api_key: "YOUR_RELAY_KEY"
-      model: "openai/gemini-3.1-pro-preview"
-      max_tokens: 65536
-    kimi:
-      endpoint: "https://relay.tuyoo.com/v1"
-      api_key: "YOUR_RELAY_KEY"
-      model: "openai/kimi-k2.5"
-      max_tokens: 65536
-    glm:
-      endpoint: "https://relay.tuyoo.com/v1"
-      api_key: "YOUR_RELAY_KEY"
-      model: "openai/glm-5"
-      max_tokens: 65536
-    minimax:
-      endpoint: "https://relay.tuyoo.com/v1"
-      api_key: "YOUR_RELAY_KEY"
-      model: "openai/minimax-m2.5"
-      max_tokens: 65536
 
-  # ---------- 直连模式（取消注释替换上方 providers 和 routing_rules）----------
-  #
-  # 单模型模式 —— 所有子任务都用主控模型，最简配置：
-  #
-  # planner_model: "default"
-  # reducer_model: "default"
-  # default_model: "default"
-  # routing_rules: []
+  # 如果某个子任务 provider 需要覆盖全局配置（如不同的 temperature），
+  # 可以在这里局部定义，同名会覆盖全局：
   # providers:
-  #   default:
-  #     endpoint: "https://api.openai.com/v1"
-  #     api_key: "sk-your-openai-key"
-  #     model: "gpt-5.4"
-  #     max_tokens: 16384
-  #
-  # 多模型模式 —— 不同任务类型路由到不同 provider：
-  #
-  # planner_model: "gpt"
-  # reducer_model: "gpt"
-  # default_model: "gpt"
-  # routing_rules:
-  #   - node_type_pattern: "coding*"
-  #     target_model: "claude"
-  #   - node_type_pattern: "reasoning"
-  #     target_model: "gpt"
-  #   - node_type_pattern: "search"
-  #     target_model: "gpt"
-  # providers:
-  #   claude:
-  #     endpoint: "https://api.anthropic.com/v1"
-  #     api_key: "sk-ant-your-key"
-  #     model: "claude-opus-4-20250514"
-  #     max_tokens: 16384
-  #     thinking_enabled: true
-  #     thinking_effort: "high"
   #   gpt:
   #     endpoint: "https://api.openai.com/v1"
-  #     api_key: "sk-your-openai-key"
+  #     api_key: "sk-different-key"
   #     model: "gpt-5.4"
+  #     temperature: 0.1
   #     max_tokens: 16384
 
 # ============================================================================

@@ -17,6 +17,10 @@ use crate::subtasks::SubtasksConfig;
 /// 各端只解析自己需要的段，不认识的段自动忽略（serde default）。
 #[derive(Debug, Default, Deserialize)]
 pub struct BaseConfig {
+    /// 全局 Provider 定义：各模型独立配置 endpoint / api_key / model。
+    /// 主控 LLM 和子任务引擎通过名字引用。
+    #[serde(default)]
+    pub providers: HashMap<String, crate::subtasks::config::ProviderConfig>,
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
@@ -58,8 +62,14 @@ fn default_idle_timeout_secs() -> u64 {
 }
 
 /// LLM 配置。
+///
+/// 推荐用法：在顶层 `providers` 定义模型，这里用 `provider` 引用名字。
+/// 也兼容旧格式：直接写 `api_key` / `api_base` / `model`。
 #[derive(Debug, Default, Deserialize)]
 pub struct LlmConfig {
+    /// 引用全局 providers 中的名字（推荐）。
+    /// 设置后忽略下方的 api_key / api_base / model / thinking_* 字段。
+    pub provider: Option<String>,
     pub api_key: Option<String>,
     pub api_base: Option<String>,
     pub model: Option<String>,

@@ -352,29 +352,50 @@ target/release/dingtalk-gateway
 
 ## 配置参考
 
-`workspace/config/config.yaml`：
+`workspace/config/config.yaml`（详见 `config.example.yaml`）：
 
 ```yaml
+# 所有模型统一定义，每个可自由选择直连或代理
+providers:
+  gpt:
+    endpoint: "https://api.openai.com/v1"      # 直连
+    api_key: "sk-..."
+    model: "gpt-5.4"
+  claude-opus:
+    endpoint: "https://relay.tuyoo.com/v1"      # 代理
+    api_key: "YOUR_RELAY_KEY"
+    model: "openai/claude-opus-4.6"
+    thinking_enabled: true
+    thinking_effort: "high"
+  gemini-pro:
+    endpoint: "https://relay.tuyoo.com/v1"
+    api_key: "YOUR_RELAY_KEY"
+    model: "openai/gemini-3.1-pro-preview"
+
+# 主控 LLM —— 引用 provider 名字
 llm:
-  api_key: "..."
-  api_base: "https://..."
-  model: "openai/gpt-5.4"
+  provider: "gpt"
   max_iterations: 99
   context_window_tokens: 200000
 
-workspace:
-  key_strategy: "user_id"       # user_id | conversation
-  idle_timeout_secs: 1800       # 空闲 30 分钟后回收（0 = 不回收）
-
+# 子任务 —— 路由到不同 provider
 subtasks:
   enabled: true
-  max_concurrency: 4
+  planner_model: "gpt"
+  reducer_model: "gpt"
+  default_model: "gpt"
   routing_rules:
     - node_type_pattern: "coding*"
       target_model: "claude-opus"
     - node_type_pattern: "search"
       target_model: "gemini-pro"
+
+workspace:
+  key_strategy: "user_id"       # user_id | conversation
+  idle_timeout_secs: 1800       # 空闲 30 分钟后回收（0 = 不回收）
 ```
+
+**配置优先级**：命令行参数 > 环境变量 > `providers[name]` > `llm` 内联字段 > 默认值
 
 **workspace 配置说明**：
 

@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use reqwest::Client;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -21,8 +21,6 @@ pub struct DingTalkBot {
     http_client: Client,
     robot_code: String,
     workspace_root: PathBuf,
-    workspace_id: String,
-    workspace_routes: HashMap<String, String>,
 }
 
 impl DingTalkBot {
@@ -31,31 +29,16 @@ impl DingTalkBot {
         token_manager: TokenManager,
         robot_code: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
-        workspace_id: impl Into<String>,
-        workspace_routes: HashMap<String, String>,
     ) -> Arc<Self> {
         let robot_code_str: String = robot_code.into();
         let workspace_root: PathBuf = workspace_root.into();
-        let workspace_id_str: String = workspace_id.into();
         Arc::new(Self {
             bus_handle,
             token_manager,
             http_client: Client::new(),
             robot_code: robot_code_str,
             workspace_root,
-            workspace_id: workspace_id_str,
-            workspace_routes,
         })
-    }
-
-    fn resolve_workspace_id(&self, message: &ChatbotMessage) -> String {
-        if message.is_private() {
-            return self.workspace_id.clone();
-        }
-        self.workspace_routes
-            .get(&message.conversation_id)
-            .cloned()
-            .unwrap_or_else(|| self.workspace_id.clone())
     }
 }
 
@@ -102,7 +85,6 @@ impl ChatbotHandler for DingTalkBot {
         };
 
         let clear_keywords: HashSet<&str> = CLEAR_KEYWORDS.iter().copied().collect();
-        let workspace_id = self.resolve_workspace_id(&message);
 
         let conv_id = if message.conversation_id.is_empty() {
             None
@@ -114,7 +96,7 @@ impl ChatbotHandler for DingTalkBot {
             let msg = InboundMessage {
                 content: "/new".into(),
                 user_id: staff_id.clone(),
-                workspace_id: workspace_id.clone(),
+                workspace_id: "default".into(),
                 channel: channel.into(),
                 chat_id: chat_id.clone(),
                 conversation_id: conv_id.clone(),
@@ -210,7 +192,7 @@ impl ChatbotHandler for DingTalkBot {
         let msg = InboundMessage {
             content: question_full,
             user_id: staff_id.clone(),
-            workspace_id: workspace_id.clone(),
+            workspace_id: "default".into(),
             channel: channel.into(),
             chat_id: chat_id.clone(),
             conversation_id: conv_id,
