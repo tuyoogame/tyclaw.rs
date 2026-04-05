@@ -70,6 +70,10 @@ pub fn start_pool(
         let cs = client_secret.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
+            // 错开连接启动，避免同时发起多个 WebSocket 握手被钉钉限流
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(i as u64 * 500)).await;
+            }
             run_connection(i, cid, cs, tx).await;
         });
     }

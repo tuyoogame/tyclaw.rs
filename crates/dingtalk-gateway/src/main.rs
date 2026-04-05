@@ -12,19 +12,20 @@
 //! TyClaw Instance 1..M
 //! ```
 //!
-//! TyClaw 实例连接网关后自动接收分配的消息。
-//! 同一会话（conversation_id）始终路由到同一个实例（会话亲和）。
+//! TyClaw 实例连接网关后发送 register 消息注册 label。
+//! 路由模式（route_table / hash）按 sender_id 统一路由。
 //! 实例断开后，其会话自动重新分配到其他实例。
 
 mod config;
 mod upstream;
 mod downstream;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -43,10 +44,24 @@ async fn main() {
     let args = Args::parse();
     let cfg = config::load(std::path::Path::new(&args.config));
 
+    // 校验 weights 配置
+    if !cfg.routing.weights.is_empty() {
+        let sum: u32 = cfg.routing.weights.values().sum();
+        if sum != 100 {
+            eprintln!(
+                "routing.weights must sum to 100, got {} (weights: {:?})",
+                sum, cfg.routing.weights
+            );
+            std::process::exit(1);
+        }
+    }
+
     info!(
         upstream_connections = cfg.dingtalk.upstream_connections,
         listen_addr = %cfg.gateway.listen_addr,
         client_id = %cfg.dingtalk.client_id,
+        routing_mode = %cfg.routing.mode,
+        routing_default = %cfg.routing.default,
         "DingTalk Gateway starting"
     );
 
@@ -62,7 +77,10 @@ async fn main() {
     );
 
     // 启动下游管理器
-    let downstream = downstream::DownstreamManager::new(cfg.gateway.ready_wait_secs);
+    let downstream = downstream::DownstreamManager::new(
+        cfg.gateway.ready_wait_secs,
+        cfg.routing,
+    );
     let downstream_for_listen = Arc::clone(&downstream);
     let listen_addr = cfg.gateway.listen_addr.clone();
     tokio::spawn(async move {
@@ -75,7 +93,12 @@ async fn main() {
         downstream_for_ready.wait_ready().await;
     });
 
-    // 消息分发循环
+    // 注册 SIGHUP 信号（在进入事件循环之前注册，避免竞态）
+    let config_path = PathBuf::from(&args.config);
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("Failed to register SIGHUP handler");
+
+    // 消息分发 + 热加载循环
     info!("Message dispatcher started");
     let mut total_dispatched: u64 = 0;
     loop {
@@ -86,6 +109,24 @@ async fn main() {
                     info!(total_dispatched, "Dispatch milestone");
                 }
                 downstream.dispatch(&msg).await;
+            }
+            _ = sighup.recv() => {
+                info!("Received SIGHUP, reloading routing config from {:?}", config_path);
+                match config::reload_routing(&config_path) {
+                    Ok(new_routing) => {
+                        info!(
+                            mode = %new_routing.mode,
+                            default = %new_routing.default,
+                            rules = new_routing.rules.len(),
+                            weights = ?new_routing.weights,
+                            "Routing config reloaded"
+                        );
+                        downstream.swap_routing(new_routing);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Routing config reload failed, keeping current config");
+                    }
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("Received SIGINT, shutting down");
