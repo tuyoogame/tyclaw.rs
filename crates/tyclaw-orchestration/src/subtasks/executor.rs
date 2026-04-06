@@ -154,11 +154,18 @@ impl NodeExecutor {
         ));
 
         // 子 agent 进度回调：带 node_id 前缀，统一 dim 灰色
+        // [heartbeat] 消息通过 task_local 转发给父 agent 的通道（钉钉等）
         let node_id_for_cb = node.id.clone();
         let sub_progress: OnProgress = Box::new(move |msg: &str| {
             let node_id = node_id_for_cb.clone();
             let msg = msg.to_string();
             Box::pin(async move {
+                if msg.starts_with("[heartbeat]") {
+                    if let Ok(tx) = tyclaw_agent::runtime::HEARTBEAT_TX.try_with(|tx| tx.clone()) {
+                        tx(msg);
+                    }
+                    return;
+                }
                 let (_, content) = parse_thinking_prefix(&msg);
                 eprintln!("\x1b[2m[sub:{}] {}\x1b[0m", node_id, content);
             })

@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -23,6 +24,8 @@ pub struct DingTalkStreamClient {
     credential: Credential,
     http_client: Client,
     handlers: Arc<Mutex<Vec<(String, Arc<dyn ChatbotHandler>)>>>,
+    /// 已处理的 msg_id 集合，用于去重（防止钉钉重复投递）。
+    processed_msg_ids: Arc<Mutex<HashSet<String>>>,
 }
 
 impl DingTalkStreamClient {
@@ -31,6 +34,7 @@ impl DingTalkStreamClient {
             credential,
             http_client: Client::new(),
             handlers: Arc::new(Mutex::new(Vec::new())),
+            processed_msg_ids: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -165,8 +169,22 @@ impl DingTalkStreamClient {
             let ack = AckMessage::ok(frame.headers.clone());
             self.send_ack(write, &ack).await;
 
-            let callback = CallbackMessage::from_frame(frame);
             let msg_id = frame.message_id().to_string();
+
+            // 消息去重：防止钉钉重复投递
+            {
+                let mut seen = self.processed_msg_ids.lock().await;
+                if !seen.insert(msg_id.clone()) {
+                    warn!(msg_id = %msg_id, "DingTalk Stream: duplicate message, skipping");
+                    return;
+                }
+                // 防止内存无限增长，保留最近 1000 条
+                if seen.len() > 1000 {
+                    seen.clear();
+                }
+            }
+
+            let callback = CallbackMessage::from_frame(frame);
             info!(msg_id = %msg_id, topic = %topic, "DingTalk Stream: dispatching message (async)");
             tokio::spawn(async move {
                 let start = std::time::Instant::now();

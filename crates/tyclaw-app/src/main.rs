@@ -550,6 +550,27 @@ async fn run_outbound_dispatcher(
                         eprintln!("\n\x1b[31m[DT:{chat_id}] Error: {message}\x1b[0m\n");
                     }
                     OutboundEvent::Progress { message, .. } => {
+                        // 心跳消息发送到钉钉
+                        if let Some(text) = message.strip_prefix("[heartbeat]") {
+                            let (conversation_id, user_id) = if chat_id.contains(':') {
+                                let parts: Vec<&str> = chat_id.splitn(2, ':').collect();
+                                (parts[0], parts[1])
+                            } else {
+                                ("", chat_id.as_str())
+                            };
+                            if let Ok(token) = sender.token_manager.get_token().await {
+                                handler::send_text_by_channel(
+                                    &sender.http_client,
+                                    &token,
+                                    &sender.robot_code,
+                                    &channel,
+                                    user_id,
+                                    conversation_id,
+                                    text,
+                                )
+                                .await;
+                            }
+                        }
                         if message.contains("[sandbox]") || message.contains("[已创建任务") {
                             println!("\x1b[32m[DT:{chat_id}] {message}\x1b[0m");
                         } else {

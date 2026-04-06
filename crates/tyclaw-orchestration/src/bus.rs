@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use tyclaw_agent::runtime::HeartbeatSender;
 
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
@@ -62,7 +63,7 @@ pub enum OutboundEvent {
 /// 消息总线 —— 入站消费 + 并发处理 + 出站路由。
 ///
 /// 每条入站消息 tokio::spawn 独立处理，不同用户/session 并发执行。
-/// Orchestrator 内部的共享状态（sessions、pending_ask_user 等）已用 Mutex 保护，无需额外的 session 锁。
+/// 同一 workspace 的串行保证由 Orchestrator 内部的 per-workspace 锁实现。
 pub struct MessageBus {
     orchestrator: Arc<Orchestrator>,
     inbound_rx: mpsc::Receiver<InboundMessage>,
@@ -135,6 +136,20 @@ impl MessageBus {
         let chat_id_owned = chat_id.clone();
 
         let run_future = orchestrator.handle_with_context(&msg.content, &req, Some(&progress_cb));
+
+        // 构建心跳发送器：子任务通过 task_local 转发 [heartbeat] 消息到消息总线
+        let heartbeat_outbound = outbound_tx.clone();
+        let heartbeat_channel = channel.clone();
+        let heartbeat_chat_id = chat_id.clone();
+        let heartbeat_sender: HeartbeatSender = Arc::new(move |msg: String| {
+            let _ = heartbeat_outbound.try_send(OutboundEvent::Progress {
+                channel: heartbeat_channel.clone(),
+                chat_id: heartbeat_chat_id.clone(),
+                message: msg,
+            });
+        });
+
+        let run_future = tyclaw_agent::runtime::HEARTBEAT_TX.scope(heartbeat_sender, run_future);
 
         let result = if msg.is_timer {
             tyclaw_tools::timer::TIMER_IN_CONTEXT

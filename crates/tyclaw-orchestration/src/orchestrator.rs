@@ -61,6 +61,9 @@ pub struct Orchestrator {
     pub(crate) timer_service: Option<Arc<tyclaw_tools::timer::TimerService>>,
     pub(crate) active_tasks: Arc<parking_lot::Mutex<HashMap<String, ActiveTask>>>,
     pub(crate) sandbox_pool: Option<Arc<dyn tyclaw_sandbox::SandboxPool>>,
+    /// Per-workspace 消息注入队列：workspace busy 时，新消息注入到运行中的 agent loop。
+    pub(crate) injection_queues:
+        parking_lot::Mutex<HashMap<String, tyclaw_agent::runtime::InjectionQueue>>,
 }
 
 /// 活跃任务条目
@@ -90,6 +93,20 @@ impl Orchestrator {
         }))
         .unwrap_or_default();
         let _ = std::fs::write(self.app.workspace.join(".active_tasks.json"), content);
+    }
+
+    /// 获取或创建指定 workspace 的注入队列。
+    fn get_injection_queue(
+        &self,
+        workspace_key: &str,
+    ) -> tyclaw_agent::runtime::InjectionQueue {
+        let mut queues = self.injection_queues.lock();
+        queues
+            .entry(workspace_key.to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))
+            })
+            .clone()
     }
 
     /// 创建 Builder（SDK 场景推荐）。
@@ -262,7 +279,10 @@ impl Orchestrator {
                     let cache_scope = format!("session:{workspace_key}");
                     orch.provider.clear_cache_scope(&cache_scope);
 
-                    // 6. 写审计日志
+                    // 6. 清理 per-workspace 串行锁
+                    orch.injection_queues.lock().remove(&workspace_key);
+
+                    // 7. 写审计日志
                     let session_id = "reaper".to_string();
                     let _ = orch.persistence.audit.log(&AuditEntry {
                         timestamp: chrono::Utc::now(),
@@ -330,6 +350,42 @@ impl Orchestrator {
             conversation_id: req.conversation_id.as_deref(),
         };
         let workspace_key = self.persistence.workspace_mgr.resolve_key(&identity);
+
+        // 如果 workspace 正在处理中，将消息注入到运行中的 agent loop，立即返回
+        if let Some(_elapsed) = self.persistence.sessions.busy_elapsed(&workspace_key) {
+            info!(
+                workspace_key = %workspace_key,
+                "Workspace busy, injecting message into running agent loop"
+            );
+
+            // 复制附件到 workspace 并组装完整消息（与正常流程一致）
+            let mut msg = user_message.to_string();
+            if !req.file_attachments.is_empty() {
+                self.persistence.workspace_mgr.ensure_workspace(&workspace_key);
+                let attachments_dir = self.persistence.workspace_mgr.attachments_dir(&workspace_key);
+                msg.push_str("\n\n[附件文件]");
+                for (path, name) in &req.file_attachments {
+                    let dest = attachments_dir.join(name);
+                    let _ = std::fs::create_dir_all(&attachments_dir);
+                    let display_path = format!("attachments/{name}");
+                    if path != &dest {
+                        let _ = std::fs::copy(path, &dest);
+                    }
+                    msg.push_str(&format!("\n- {name} (路径: {display_path})"));
+                }
+            }
+
+            let queue = self.get_injection_queue(&workspace_key);
+            if let Ok(mut pending) = queue.lock() {
+                pending.push(tyclaw_agent::runtime::chat_message("user", &msg));
+            }
+            return Ok(AgentResponse {
+                text: String::new(),
+                tools_used: vec![],
+                duration_seconds: start.elapsed().as_secs_f64(),
+                output_files: Vec::new(),
+            });
+        }
 
         // 确保 workspace 目录结构存在
         self.persistence.workspace_mgr.ensure_workspace(&workspace_key);
@@ -790,6 +846,8 @@ impl Orchestrator {
         // turn_id 由 agent_loop 生成并打在每条新消息上，save_turn 按此筛选。
 
         let cache_scope = format!("session:{workspace_key}");
+        let injection_queue = self.get_injection_queue(&workspace_key);
+
         let run_future = self.runtime.run(
             initial_messages,
             &user_role,
@@ -814,7 +872,11 @@ impl Orchestrator {
                                     user_id_owned,
                                     tyclaw_tools::timer::TIMER_CURRENT_CONVERSATION_ID.scope(
                                         conversation_id_owned,
-                                        tyclaw_sandbox::CURRENT_SANDBOX.scope(sb_clone, run_future),
+                                        tyclaw_sandbox::CURRENT_SANDBOX.scope(
+                            sb_clone,
+                            tyclaw_agent::runtime::INJECTION_QUEUE
+                                .scope(injection_queue.clone(), run_future),
+                        ),
                                     ),
                                 ),
                             ),
@@ -835,7 +897,11 @@ impl Orchestrator {
                                 tyclaw_tools::timer::TIMER_CURRENT_USER_ID.scope(
                                     user_id_owned,
                                     tyclaw_tools::timer::TIMER_CURRENT_CONVERSATION_ID
-                                        .scope(conversation_id_owned, run_future),
+                                        .scope(
+                                            conversation_id_owned,
+                                            tyclaw_agent::runtime::INJECTION_QUEUE
+                                                .scope(injection_queue, run_future),
+                                        ),
                                 ),
                             ),
                         ),

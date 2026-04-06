@@ -185,6 +185,18 @@ impl SessionManager {
         }
     }
 
+    /// 查询 workspace 的忙碌状态。
+    ///
+    /// 返回 `Some(elapsed)` 表示忙碌中（elapsed 为已忙碌时长），`None` 表示空闲。
+    pub fn busy_elapsed(&self, workspace_key: &str) -> Option<std::time::Duration> {
+        let cache = self.cache.lock();
+        cache
+            .get(workspace_key)
+            .and_then(|a| a.busy_since)
+            .filter(|since| since.elapsed().as_secs() < BUSY_TIMEOUT_SECS)
+            .map(|since| since.elapsed())
+    }
+
     /// 清除 workspace 的忙碌状态（handle_with_context 结束时调用）。
     pub fn clear_busy(&self, workspace_key: &str) {
         let mut cache = self.cache.lock();

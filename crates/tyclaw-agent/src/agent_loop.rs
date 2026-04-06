@@ -164,6 +164,19 @@ impl AgentRuntime for AgentLoop {
         }
 
         loop {
+            // 检查是否有运行期间注入的用户消息
+            if let Ok(queue) = crate::runtime::INJECTION_QUEUE
+                .try_with(|q: &crate::runtime::InjectionQueue| q.clone())
+            {
+                if let Ok(mut pending) = queue.lock() {
+                    if !pending.is_empty() {
+                        let injected: Vec<_> = pending.drain(..).collect();
+                        info!(count = injected.len(), "Injected user messages into running loop");
+                        messages.extend(injected);
+                    }
+                }
+            }
+
             total_iterations += 1;
             // 检查总轮次上限（探索+产出不超过 2 * max_iterations）
             if total_iterations > budget.global_llm_cap() {
@@ -220,6 +233,9 @@ impl AgentRuntime for AgentLoop {
 
             // CLI 进度：打印当前轮次
             if let Some(cb) = on_progress {
+                if total_iterations % 10 == 0 {
+                    cb("[heartbeat]小虾在拼命干活中...请稍后...").await;
+                }
                 cb(&format!(
                     "[轮次 {total_iterations}] 阶段={phase} 第{phase_iter}轮"
                 ))

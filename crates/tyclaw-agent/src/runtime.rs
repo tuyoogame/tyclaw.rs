@@ -7,8 +7,22 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tyclaw_types::TyclawError;
+
+/// Per-workspace 消息注入队列：外部可在 agent loop 运行期间追加用户消息。
+pub type InjectionQueue = Arc<StdMutex<Vec<HashMap<String, Value>>>>;
+
+/// 心跳发送器：子任务可通过此将消息转发到钉钉等通道。
+pub type HeartbeatSender = Arc<dyn Fn(String) + Send + Sync>;
+
+tokio::task_local! {
+    /// Agent loop 运行期间，orchestrator 可通过此 task_local 注入用户消息。
+    pub static INJECTION_QUEUE: InjectionQueue;
+    /// 心跳消息发送器：子任务通过此转发心跳到消息总线。
+    pub static HEARTBEAT_TX: HeartbeatSender;
+}
 
 /// Agent 运行时的完成状态。
 #[derive(Debug, Clone, PartialEq, Eq)]

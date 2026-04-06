@@ -210,6 +210,11 @@ impl ChatbotHandler for DingTalkBot {
         match result {
             Ok(response) => {
                 let mut reply_text = response.text;
+                // 空回复不发送（如消息注入到运行中的 agent loop 时）
+                if reply_text.trim().is_empty() {
+                    info!("DingTalk: empty response, skipping reply");
+                    return (200, "OK".into());
+                }
                 if reply_text.len() > 20000 {
                     reply_text.truncate(20000);
                     reply_text.push_str("\n\n...（内容过长已截断）");
