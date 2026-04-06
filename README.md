@@ -188,11 +188,17 @@ cp workspace/config/config.example.yaml workspace/config/config.yaml
 # 清理运行时数据后启动（保留 memory）
 ./start.sh --clean
 
+# 重新构建 sandbox Docker 镜像（并回收旧容器）
+./start.sh --build-docker
+
 # 启动并连接钉钉
 ./start.sh --dingtalk
 
 # 组合使用：先清理再以钉钉模式启动
 ./start.sh --clean --dingtalk
+
+# 重建镜像 + 清理 + 钉钉模式
+./start.sh --build-docker --clean --dingtalk
 ```
 
 **参数说明：**
@@ -201,6 +207,7 @@ cp workspace/config/config.example.yaml workspace/config/config.yaml
 |------|------|
 | （无参数） | 直接启动，保留上次所有运行时状态 |
 | `--clean` | 启动前清理运行时数据（见下方详细说明） |
+| `--build-docker` | 重新构建 sandbox Docker 镜像并回收旧容器 |
 | `--dingtalk` | 启动后连接钉钉 Stream，进入钉钉 + CLI 混合模式 |
 | 其他参数 | 透传给 `tyclaw-app`（如 `--works-dir /data/works`） |
 

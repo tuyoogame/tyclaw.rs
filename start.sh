@@ -3,6 +3,7 @@
 # 用法：
 #   ./start.sh              直接启动（保留上次状态）
 #   ./start.sh --clean      清理运行时数据后启动
+#   ./start.sh --build-docker 重新构建 sandbox Docker 镜像
 #   ./start.sh --dingtalk   启动并连接钉钉
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -10,11 +11,13 @@ cd "$SCRIPT_DIR"
 
 RUN_DIR="$SCRIPT_DIR/workspace"
 CLEAN=false
+BUILD_DOCKER=false
 EXTRA_ARGS=""
 
 for arg in "$@"; do
     case "$arg" in
         --clean) CLEAN=true ;;
+        --build-docker) BUILD_DOCKER=true ;;
         *) EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
     esac
 done
@@ -81,6 +84,25 @@ if [ "$CLEAN" = true ]; then
     echo "[ok] demo 数据已复制到 cli_user"
 
     echo "=== Clean done ==="
+    echo ""
+fi
+
+# =========================================================================
+# --build-docker: 重新构建 sandbox 镜像并回收旧容器
+# =========================================================================
+if [ "$BUILD_DOCKER" = true ]; then
+    echo "=== Build sandbox Docker image ==="
+    docker build --no-cache -t tyclaw-sandbox "$SCRIPT_DIR/docker/sandbox"
+    echo "[ok] sandbox 镜像已重建"
+
+    # 回收使用旧镜像的容器
+    OLD_CONTAINERS=$(docker ps -a --filter "name=tyclaw-" --format "{{.Names}}" 2>/dev/null)
+    if [ -n "$OLD_CONTAINERS" ]; then
+        echo "$OLD_CONTAINERS" | while read name; do
+            docker rm -f "$name" 2>/dev/null
+        done
+        echo "[ok] 旧 sandbox 容器已回收"
+    fi
     echo ""
 fi
 

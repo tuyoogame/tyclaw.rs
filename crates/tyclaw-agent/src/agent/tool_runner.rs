@@ -82,11 +82,50 @@ pub(crate) async fn run_tool_calls_round(
         }
     }
 
+    // 一轮内只允许执行一个 dispatch_subtasks，找到最后一个的 id，前面的跳过。
+    // 原因：LLM 偶尔在一轮内返回多个 dispatch，每个都会启动子 agent 消耗资源，
+    // 但只有最后一个的结果对主控有意义（前面的会被覆盖/忽略）。
+    let last_dispatch_id: Option<String> = tool_calls
+        .iter()
+        .rev()
+        .find(|tc| tc.name == "dispatch_subtasks")
+        .map(|tc| tc.id.clone());
+    let dispatch_count = tool_calls
+        .iter()
+        .filter(|tc| tc.name == "dispatch_subtasks")
+        .count();
+
     let mut executed: Vec<(String, String, ToolExecutionResult)> = Vec::new();
     for tc in tool_calls {
         let tool_name = tc.name.clone();
         let tool_id = tc.id.clone();
         let mut args = tc.arguments.clone();
+
+        // 跳过非最后一个 dispatch_subtasks
+        if tool_name == "dispatch_subtasks"
+            && dispatch_count > 1
+            && last_dispatch_id.as_deref() != Some(&tool_id)
+        {
+            warn!(
+                tool_id = %tool_id,
+                dispatch_count,
+                "Skipping duplicate dispatch_subtasks (only last one per round is executed)"
+            );
+            executed.push((
+                tool_id,
+                tool_name,
+                ToolExecutionResult {
+                    output: "(skipped: only one dispatch_subtasks per round is executed; this was superseded by a later call)".to_string(),
+                    route: "agent".into(),
+                    status: "skipped".into(),
+                    duration_ms: 0,
+                    gate_action: "bypass".into(),
+                    risk_level: "policy".into(),
+                    sandbox_id: None,
+                },
+            ));
+            continue;
+        }
 
         if tool_name == "ask_user" {
             let question = args

@@ -258,14 +258,16 @@ impl AgentRuntime for AgentLoop {
                 &tools_used,
             );
 
-            let snapshot_chars = phase::state_snapshot_limit_chars(total_iterations);
-            let snapshot = ctx_state.render_prompt_context(snapshot_chars);
-            if !snapshot.is_empty() {
-                compressed.push(chat_message(
-                    "system",
-                    &format!("[[TYCLAW_STATE_VIEW]]\n{snapshot}"),
-                ));
-            }
+            // TODO: STATE_VIEW 每轮内容变化会破坏 prompt cache 的前缀匹配，
+            // 暂时禁用以验证缓存增长。后续应改为嵌入 user 消息或固定化。
+            // let snapshot_chars = phase::state_snapshot_limit_chars(total_iterations);
+            // let snapshot = ctx_state.render_prompt_context(snapshot_chars);
+            // if !snapshot.is_empty() {
+            //     compressed.push(chat_message(
+            //         "system",
+            //         &format!("[[TYCLAW_STATE_VIEW]]\n{snapshot}"),
+            //     ));
+            // }
 
             // === Context 快照（可选） ===
             // 仅在显式开启 write_snapshot 时落盘，默认关闭以降低 I/O 和磁盘占用。

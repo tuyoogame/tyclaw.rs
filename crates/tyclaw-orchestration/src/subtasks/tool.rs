@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,8 @@ pub struct DispatchSubtasksTool {
     description: String,
     /// 不可变的应用级上下文。
     app: Arc<AppContext>,
+    /// 运行锁：防止并发 dispatch（同一时刻只允许一个 dispatch 在执行）。
+    running: AtomicBool,
 }
 
 use super::routing::RoutingPolicy;
@@ -84,6 +87,7 @@ impl DispatchSubtasksTool {
             reducer: Arc::new(reducer),
             description,
             app,
+            running: AtomicBool::new(false),
         }
     }
 
@@ -240,6 +244,19 @@ impl Tool for DispatchSubtasksTool {
     }
 
     async fn execute(&self, params: HashMap<String, Value>) -> String {
+        // 并发锁：同一时刻只允许一个 dispatch 执行，防止 LLM 并发调用浪费资源
+        if self.running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            warn!("dispatch_subtasks: rejected concurrent call (another dispatch is already running)");
+            return "Error: Another dispatch_subtasks is already running. Wait for it to complete before dispatching again.".into();
+        }
+        struct RunningGuard<'a>(&'a AtomicBool);
+        impl Drop for RunningGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _guard = RunningGuard(&self.running);
+
         // 解析子任务列表
         let subtasks_val = match params.get("subtasks") {
             Some(v) => v.clone(),

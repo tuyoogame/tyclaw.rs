@@ -787,6 +787,9 @@ impl Orchestrator {
             None
         };
 
+        // 记录初始消息数——agent_loop 只在此后追加新消息，save_turn 据此跳过前缀
+        let initial_messages_len = initial_messages.len();
+
         let cache_scope = format!("session:{workspace_key}");
         let run_future = self.runtime.run(
             initial_messages,
@@ -893,8 +896,7 @@ impl Orchestrator {
             );
             // 保存暂停时已完成的轮次到会话
             if !result.messages.is_empty() {
-                let skip = 1 + history.len();
-                self.save_turn(&workspace_key, &result.messages, skip);
+                    self.save_turn(&workspace_key, &result.messages, initial_messages_len);
             }
             // 保存完整消息历史，以便恢复时使用
             self.pending_ask_user
@@ -920,8 +922,7 @@ impl Orchestrator {
 
         // 10. 保存轮次到会话
         if !result.messages.is_empty() {
-            let skip = 1 + history.len();
-            self.save_turn(&workspace_key, &result.messages, skip);
+            self.save_turn(&workspace_key, &result.messages, initial_messages_len);
         }
 
         // 11. 合并后检查
@@ -1025,20 +1026,34 @@ impl Orchestrator {
         }
     }
 
-    /// 保存新轮次消息到会话（截断大的工具结果）。
+    /// 保存新轮次消息���会话（截断大的工具结果）。
+    ///
+    /// 通过 `_reset_iterations_next_run` 标记定位本轮新消息的起始位置，
+    /// 只保存标记之后的消息。这比基于数量的 skip 更健壮——
+    /// 即使 agent_loop 内部压缩/修改了前缀消息，标记位置也不会漂移。
     ///
     /// 处理逻辑：
-    /// - 跳过系统消息和历史消息（由 skip 控制）
     /// - 截断过长的工具结果（超过 500 字符）
-    /// - 剥离用户消息中的运行时上下文元数据标签
+    /// - 剥离��户消息中的运行时上��文元数据标签
     /// - 为每条消息添加时间戳
     fn save_turn(
         &self,
         workspace_key: &str,
         messages: &[std::collections::HashMap<String, serde_json::Value>],
-        skip: usize,
+        initial_messages_len: usize,
     ) {
         use serde_json::Value;
+
+        // 通过标记字段定位本轮起始位置（比硬算 skip 更可靠）
+        let skip = messages
+            .iter()
+            .rposition(|m| {
+                m.get(RESET_ON_START_FIELD)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
+            .map(|i| i + 1) // 跳过标记本身
+            .unwrap_or(initial_messages_len); // 兜底：没有标记时用 initial_messages_len
 
         let mut entries = Vec::new();
 

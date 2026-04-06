@@ -191,6 +191,27 @@ impl OpenAICompatProvider {
                     apply_system_cache_control(&mut final_msgs[0]);
                 }
 
+                // 在最后一条有实际文本的 assistant 消息上加 cache_control，
+                // 让缓存范围随对话增长（覆盖 system + tools + 历史前缀）。
+                // 跳过 tool-call-only 的 assistant（content 为空），CC 加在空 block 上无效。
+                // 不能加在 tool 消息上（format 会被 normalize_to_blocks 还原，破坏前缀）。
+                if let Some(last_hist_idx) = final_msgs.iter().rposition(|m| {
+                    let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    if role != "assistant" { return false; }
+                    // 检查 content 是否有非空文本
+                    match m.get("content") {
+                        Some(Value::Array(blocks)) => blocks.iter().any(|b| {
+                            b.get("text").and_then(|t| t.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+                        }),
+                        Some(Value::String(s)) => !s.is_empty(),
+                        _ => false,
+                    }
+                }) {
+                    if last_hist_idx > 0 {
+                        add_history_cache_breakpoint(&mut final_msgs[last_hist_idx]);
+                    }
+                }
+
                 let (first_diff_idx, first_diff_reason) =
                     first_payload_diff(&prev_state.committed_final_messages, &final_msgs);
                 let protected_prefix_len = prefix_len.min(final_msgs.len());
@@ -219,16 +240,32 @@ impl OpenAICompatProvider {
                 });
                 final_msgs
             } else {
-                // 无 scope：只加 system cache_control
+                // 无 scope：只加 system cache_control + 历史 breakpoint
                 let mut final_msgs = canonical;
                 if !final_msgs.is_empty() {
                     apply_system_cache_control(&mut final_msgs[0]);
+                }
+                if let Some(last_hist_idx) = final_msgs.iter().rposition(|m| {
+                    let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    if role != "assistant" { return false; }
+                    match m.get("content") {
+                        Some(Value::Array(blocks)) => blocks.iter().any(|b| {
+                            b.get("text").and_then(|t| t.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+                        }),
+                        Some(Value::String(s)) => !s.is_empty(),
+                        _ => false,
+                    }
+                }) {
+                    if last_hist_idx > 0 {
+                        add_history_cache_breakpoint(&mut final_msgs[last_hist_idx]);
+                    }
                 }
                 final_msgs
             }
         } else {
             strip_cache_boundary(&sanitized)
         };
+        let messages_final = ensure_tool_call_pairs(messages_final);
         let mut body = json!({
             "model": model,
             "messages": messages_final,
@@ -1201,6 +1238,97 @@ fn sanitize_messages(messages: &[HashMap<String, Value>]) -> Vec<Value> {
         .collect()
 }
 
+/// 确保每个 assistant 的 tool_call 都有对应的 tool result 消息。
+///
+/// overlay / 压缩可能导致 tool result 被截断而 tool_call 仍在，
+/// OpenAI/Azure 会直接 400 拒绝。此函数作为发送前的最终兜底：
+/// - 收集所有 assistant tool_call id
+/// - 收集所有 tool 消息的 tool_call_id
+/// - 对缺失 result 的 tool_call，补一条占位 tool 消息
+/// - 对找不到 tool_call 的孤立 tool 消息，直接移除
+fn ensure_tool_call_pairs(messages: Vec<Value>) -> Vec<Value> {
+    use std::collections::HashSet;
+
+    // 收集所有 tool_call id 及其在消息列表中的位置
+    let mut call_ids: Vec<(usize, String, String)> = Vec::new(); // (assistant_idx, call_id, function_name)
+    let mut result_ids: HashSet<String> = HashSet::new();
+
+    for (i, msg) in messages.iter().enumerate() {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role == "assistant" {
+            if let Some(Value::Array(tcs)) = msg.get("tool_calls") {
+                for tc in tcs {
+                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                        let fname = tc.pointer("/function/name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        call_ids.push((i, id.to_string(), fname.to_string()));
+                    }
+                }
+            }
+        } else if role == "tool" {
+            if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                result_ids.insert(id.to_string());
+            }
+        }
+    }
+
+    let all_call_ids: HashSet<String> = call_ids.iter().map(|(_, id, _)| id.clone()).collect();
+
+    // 找出两种 orphan
+    let orphan_calls: Vec<&(usize, String, String)> = call_ids
+        .iter()
+        .filter(|(_, id, _)| !result_ids.contains(id))
+        .collect();
+    let has_orphan_results = result_ids.iter().any(|id| !all_call_ids.contains(id));
+
+    if orphan_calls.is_empty() && !has_orphan_results {
+        return messages;
+    }
+
+    if !orphan_calls.is_empty() {
+        warn!(
+            orphan_count = orphan_calls.len(),
+            orphan_ids = ?orphan_calls.iter().map(|(_, id, _)| id.as_str()).collect::<Vec<_>>(),
+            "Patching missing tool result messages"
+        );
+    }
+    if has_orphan_results {
+        let orphan_result_ids: Vec<&String> = result_ids.iter().filter(|id| !all_call_ids.contains(*id)).collect();
+        warn!(
+            orphan_count = orphan_result_ids.len(),
+            orphan_ids = ?orphan_result_ids,
+            "Removing orphan tool result messages (no matching tool_call)"
+        );
+    }
+
+    // 一次遍历：移除 orphan results + 补 missing results
+    let mut output = Vec::with_capacity(messages.len() + orphan_calls.len());
+    for (i, msg) in messages.into_iter().enumerate() {
+        // 跳过 orphan tool results
+        if msg.get("role").and_then(|v| v.as_str()) == Some("tool") {
+            if let Some(tcid) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                if !all_call_ids.contains(tcid) {
+                    continue; // orphan result, skip
+                }
+            }
+        }
+        output.push(msg);
+        // 在 assistant 消息后面补上缺失的 tool results
+        for (asst_idx, call_id, fname) in &orphan_calls {
+            if *asst_idx == i {
+                output.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": fname,
+                    "content": "(result truncated by context compression)"
+                }));
+            }
+        }
+    }
+    output
+}
+
 fn should_write_llm_request_snapshots() -> bool {
     std::env::var("TYCLAW_WRITE_LLM_REQUEST_SNAPSHOTS")
         .ok()
@@ -1256,14 +1384,20 @@ fn snapshot_scope_dir(scope: &str) -> PathBuf {
 /// - tool 消息的 content 保持 string（OpenAI 格式要求，relay 不认 array）
 /// - null → 不变（assistant with tool_calls）
 /// - 已经是 array → strip cache_control，保持结构
+///
+/// **重要**：assistant 和 tool 消息保持 string 格式（不转 array block）。
+/// 原因：cache_control 加在 array block 上会改变 JSON 字节，移走后字节不同，
+/// 破坏 Anthropic prompt cache 的前缀匹配。保持 string 格式后，
+/// Anthropic 视 string 和 array block 为等价，CC 移走不影响前缀。
+/// 只有 system/user 消息转为 array block（system 需要 CC，user context 不变）。
 fn normalize_to_blocks(messages: &[Value]) -> Vec<Value> {
     messages.iter().map(|msg| {
         let mut m = msg.clone();
         strip_cache_control_fields(&mut m);
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        // tool 消息的 content 必须保持 string（OpenAI 格式要求）
+
+        // tool 消息：必须保持 string（OpenAI 格式要求）
         if role == "tool" {
-            // 如果已被转成 array，恢复为 string
             if let Some(Value::Array(blocks)) = m.get("content").cloned() {
                 if blocks.len() == 1 {
                     if let Some(text) = blocks[0].get("text").and_then(|v| v.as_str()) {
@@ -1273,6 +1407,30 @@ fn normalize_to_blocks(messages: &[Value]) -> Vec<Value> {
             }
             return m;
         }
+
+        // assistant 消息：保持 string 格式，避免 CC 增删改变字节破坏缓存前缀。
+        // null content（tool_calls only）转为空 string。
+        // 已经是 array block（之前加了 CC 的）还原为 string。
+        if role == "assistant" {
+            match m.get("content").cloned() {
+                Some(Value::Null) | None => {
+                    m["content"] = Value::String(String::new());
+                }
+                Some(Value::Array(blocks)) => {
+                    // array block → 提取文本还原为 string
+                    let text = blocks.iter()
+                        .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    m["content"] = Value::String(text);
+                }
+                Some(Value::String(_)) => {} // 已经是 string，保持
+                _ => {}
+            }
+            return m;
+        }
+
+        // system / user 消息：转为 array block（system 需要加 CC）
         if let Some(content) = m.get("content").cloned() {
             match content {
                 Value::String(s) => {
@@ -1280,8 +1438,6 @@ fn normalize_to_blocks(messages: &[Value]) -> Vec<Value> {
                 }
                 Value::Array(_) => {} // 已经是 array，strip_cache_control_fields 已处理
                 Value::Null => {
-                    // assistant with tool_calls 的 content 通常是 null
-                    // 转成空 text block，这样 cache_control 能加上去
                     m["content"] = json!([{"type": "text", "text": ""}]);
                 }
                 _ => {}
@@ -1291,50 +1447,37 @@ fn normalize_to_blocks(messages: &[Value]) -> Vec<Value> {
     }).collect()
 }
 
-/// 对 system 消息加 cache_control（处理 CACHE_BOUNDARY 分块）。
-/// 在 canonical（array block）基础上操作，只加 cache_control 字段，不改结构。
+/// 对 system 消息加 cache_control。
+///
+/// 去掉 `[[CACHE_BOUNDARY]]` 标记（历史遗留，动态内容已移至独立消息），
+/// 将整个 system 合并为单个 content block + cache_control。
+/// 多 block system 也合并——避免中间 breakpoint 导致后续 messages 缓存扩展失效。
 fn apply_system_cache_control(msg: &mut Value) {
     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
     if role != "system" { return; }
 
     const CACHE_BOUNDARY: &str = "[[CACHE_BOUNDARY]]";
 
-    if let Some(Value::Array(blocks)) = msg.get("content").cloned() {
-        // canonical 格式下 system 是 [{type:text, text:"..."}]
-        if blocks.len() == 1 {
-            if let Some(text) = blocks[0].get("text").and_then(|v| v.as_str()) {
-                if let Some(pos) = text.find(CACHE_BOUNDARY) {
-                    // 有 boundary：分成 static(+CC) + dynamic 两个 block
-                    let static_part = text[..pos].trim_end().to_string();
-                    let dynamic_part = text[pos + CACHE_BOUNDARY.len()..].trim_start().to_string();
-                    let mut new_blocks = vec![
-                        json!({"type": "text", "text": static_part, "cache_control": {"type": "ephemeral"}})
-                    ];
-                    if !dynamic_part.is_empty() {
-                        new_blocks.push(json!({"type": "text", "text": dynamic_part}));
-                    }
-                    msg["content"] = Value::Array(new_blocks);
-                } else {
-                    // 无 boundary：整个 block 加 CC
-                    msg["content"] = json!([{
-                        "type": "text",
-                        "text": text,
-                        "cache_control": {"type": "ephemeral"}
-                    }]);
-                }
-            }
+    // 提取所有 text block 的内容，合并为一个
+    let full_text = match msg.get("content") {
+        Some(Value::Array(blocks)) => {
+            blocks.iter()
+                .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
         }
-        // 多 block 的 system（已经分过块的）：在第一个 block 加 CC
-        else if blocks.len() > 1 {
-            let mut new_blocks = blocks;
-            if let Some(first) = new_blocks.first_mut() {
-                if let Some(obj) = first.as_object_mut() {
-                    obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
-                }
-            }
-            msg["content"] = Value::Array(new_blocks);
-        }
-    }
+        Some(Value::String(s)) => s.clone(),
+        _ => return,
+    };
+
+    // 去掉 CACHE_BOUNDARY 标记
+    let clean_text = full_text.replace(CACHE_BOUNDARY, "");
+
+    msg["content"] = json!([{
+        "type": "text",
+        "text": clean_text.trim(),
+        "cache_control": {"type": "ephemeral"}
+    }]);
 }
 
 fn first_payload_diff(prev: &[Value], next: &[Value]) -> (Option<usize>, &'static str) {
@@ -1419,8 +1562,7 @@ fn strip_cache_control_fields(v: &mut Value) {
     }
 }
 
-/// 旧接口保留（被 add_history_cache_breakpoint 的调用方使用）
-#[allow(dead_code)]
+/// 在历史消息（assistant/tool）上加 cache_control，推进缓存边界。
 fn add_history_cache_breakpoint(msg: &mut Value) {
     if let Some(content) = msg.get("content").cloned() {
         match content {
@@ -1653,7 +1795,8 @@ mod tests {
         let body_text = serde_json::to_string(&prepared.body).unwrap();
         assert!(body_text.contains("cache_control"));
         assert_eq!(prepared.body["provider"]["only"], json!(["anthropic"]));
-        assert_eq!(prepared.body["messages"][0]["content"][0]["text"], json!("static"));
+        // CACHE_BOUNDARY 被去掉，system 合并为一个 block
+        assert_eq!(prepared.body["messages"][0]["content"][0]["text"], json!("staticdynamic"));
     }
 
     #[test]
@@ -1982,8 +2125,8 @@ mod tests {
         // string → array block
         assert_eq!(normalized[0]["content"], json!([{"type": "text", "text": "system prompt"}]));
         assert_eq!(normalized[1]["content"], json!([{"type": "text", "text": "hello"}]));
-        // null → 空 text block（让 cache_control 能加上去）
-        assert_eq!(normalized[2]["content"], json!([{"type": "text", "text": ""}]));
+        // assistant null → 空 string（保持 string 格式，避免 CC 增删改变字节）
+        assert_eq!(normalized[2]["content"], json!(""));
         // tool content 保持 string（OpenAI 格式要求）
         assert_eq!(normalized[3]["content"], json!("result"));
     }
@@ -2016,9 +2159,9 @@ mod tests {
         };
         let body1 = build_and_commit(&provider, &req1);
         let msgs1 = body1["messages"].as_array().unwrap();
-        assert!(content_has_cache_control(&msgs1[0]));
-        assert!(!content_has_cache_control(&msgs1[1]));
-        assert!(!content_has_cache_control(&msgs1[2]));
+        assert!(content_has_cache_control(&msgs1[0]));  // system CC
+        assert!(!content_has_cache_control(&msgs1[1])); // user: no CC
+        assert!(content_has_cache_control(&msgs1[2]));  // last assistant with text: CC
 
         let req2 = ChatRequest {
             messages: vec![
@@ -2037,12 +2180,12 @@ mod tests {
         };
         let body2 = build_and_commit(&provider, &req2);
         let msgs2 = body2["messages"].as_array().unwrap();
-        assert!(content_has_cache_control(&msgs2[0]));
-        assert!(!content_has_cache_control(&msgs2[1]));
-        assert!(!content_has_cache_control(&msgs2[2]));
-        assert!(!content_has_cache_control(&msgs2[3]));
-        assert!(!content_has_cache_control(&msgs2[4]));
-        assert!(!content_has_cache_control(&msgs2[5]));
+        assert!(content_has_cache_control(&msgs2[0]));  // system CC
+        assert!(!content_has_cache_control(&msgs2[1])); // user: no CC
+        assert!(!content_has_cache_control(&msgs2[2])); // old assistant: no CC (moved)
+        assert!(!content_has_cache_control(&msgs2[3])); // user: no CC
+        assert!(content_has_cache_control(&msgs2[4]));  // last assistant with text: CC
+        assert!(!content_has_cache_control(&msgs2[5])); // user: no CC
 
         let req3 = ChatRequest {
             messages: vec![
@@ -2063,10 +2206,16 @@ mod tests {
         };
         let body3 = build_and_commit(&provider, &req3);
         let msgs3 = body3["messages"].as_array().unwrap();
-        assert!(content_has_cache_control(&msgs3[0]));
-        for msg in msgs3.iter().skip(1) {
-            assert!(!content_has_cache_control(msg));
-        }
+        assert!(content_has_cache_control(&msgs3[0]));  // system CC
+        // msgs3: sys, user, asst("Plan A"), user, asst("Plan B"), user, asst("Plan C"), user
+        // last assistant with text = msgs3[6] ("Plan C")
+        assert!(!content_has_cache_control(&msgs3[1]));
+        assert!(!content_has_cache_control(&msgs3[2]));
+        assert!(!content_has_cache_control(&msgs3[3]));
+        assert!(!content_has_cache_control(&msgs3[4]));
+        assert!(!content_has_cache_control(&msgs3[5]));
+        assert!(content_has_cache_control(&msgs3[6]));  // last assistant: CC
+        assert!(!content_has_cache_control(&msgs3[7]));
     }
 
     #[test]
