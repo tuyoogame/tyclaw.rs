@@ -36,7 +36,10 @@ static DENY_PATTERNS: &[&str] = &[
     r"\b(mkfs|diskpart)\b",
     r"\bdd\s+if=",
     r"\b(shutdown|reboot|poweroff)\b",
-    r":\(\)\s*\{.*\};\s*:",
+    r":\(\)\s*\{.*\};\s*:",       // fork 炸弹
+    r"\brm\s+-[rf]*r[rf]*\s+/\b", // rm -rf / 根目录
+    r">\s*/dev/[sh]d",             // 覆写磁盘设备
+    r"\bchmod\s+-R\s+777\s+/\b",  // 递归 chmod 根目录
 ];
 
 /// 按"字符数"安全截断 UTF-8 字符串。

@@ -620,6 +620,14 @@ impl OpenAICompatProvider {
             };
             buf.push_str(&String::from_utf8_lossy(&chunk));
 
+            // 防止恶意/异常响应导致 OOM
+            const MAX_SSE_BUF_BYTES: usize = 2 * 1024 * 1024; // 2MB
+            if buf.len() > MAX_SSE_BUF_BYTES {
+                return Err(TyclawError::Provider(format!(
+                    "SSE buffer exceeded {MAX_SSE_BUF_BYTES} bytes, aborting"
+                )));
+            }
+
             // 按行处理 SSE 事件
             while let Some(newline_pos) = buf.find('\n') {
                 let line = buf[..newline_pos].trim().to_string();
@@ -825,7 +833,10 @@ impl OpenAICompatProvider {
         let mut indices: Vec<usize> = tool_call_map.keys().cloned().collect();
         indices.sort();
         for idx in indices {
-            let (id, name, args_parts) = tool_call_map.remove(&idx).unwrap();
+            let Some((id, name, args_parts)) = tool_call_map.remove(&idx) else {
+                warn!(idx, "SSE tool_call index missing from map, skipping");
+                continue;
+            };
             let args_str = args_parts.join("");
             let arguments: HashMap<String, Value> =
                 json_repair::repair_json(&args_str)
@@ -1399,11 +1410,12 @@ fn normalize_to_blocks(messages: &[Value]) -> Vec<Value> {
         // tool 消息：必须保持 string（OpenAI 格式要求）
         if role == "tool" {
             if let Some(Value::Array(blocks)) = m.get("content").cloned() {
-                if blocks.len() == 1 {
-                    if let Some(text) = blocks[0].get("text").and_then(|v| v.as_str()) {
-                        m["content"] = Value::String(text.to_string());
-                    }
-                }
+                // 合并所有 text block，避免多 block 时只取第一个丢内容
+                let text = blocks.iter()
+                    .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                m["content"] = Value::String(text);
             }
             return m;
         }

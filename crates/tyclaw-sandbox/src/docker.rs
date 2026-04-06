@@ -123,19 +123,19 @@ impl Sandbox for DockerSandbox {
 
     async fn stat(&self, path: &str) -> Result<SandboxFileStat, TyclawError> {
         let full_path = self.resolve(path);
+        // 用位置参数 $1 传递路径，避免 shell injection
         let output = Command::new("docker")
             .args([
                 "exec",
                 &self.container_id,
                 "sh",
                 "-c",
-                &format!(
-                    "if [ -f \"{p}\" ]; then printf 'file\\n'; stat -c %s \"{p}\" 2>/dev/null || wc -c < \"{p}\"; \
-                     elif [ -d \"{p}\" ]; then printf 'dir\\n'; \
-                     elif [ -e \"{p}\" ]; then printf 'other\\n'; \
-                     else printf 'missing\\n'; fi",
-                    p = full_path.replace('"', "\\\"")
-                ),
+                "if [ -f \"$1\" ]; then printf 'file\\n'; stat -c %s \"$1\" 2>/dev/null || wc -c < \"$1\"; \
+                 elif [ -d \"$1\" ]; then printf 'dir\\n'; \
+                 elif [ -e \"$1\" ]; then printf 'other\\n'; \
+                 else printf 'missing\\n'; fi",
+                "_",  // $0 placeholder
+                &full_path,
             ])
             .output()
             .await
@@ -343,8 +343,13 @@ impl Sandbox for DockerSandbox {
             });
         }
 
+        const MAX_WALK_ENTRIES: usize = 50_000;
         let mut entries = Vec::new();
         for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if entries.len() >= MAX_WALK_ENTRIES {
+                tracing::warn!(MAX_WALK_ENTRIES, "walk_dir truncated: too many entries");
+                break;
+            }
             let mut parts = line.splitn(3, '\t');
             let kind = parts.next().unwrap_or_default();
             let rel = parts.next().unwrap_or_default();
@@ -396,7 +401,8 @@ impl Sandbox for DockerSandbox {
         if let Some(ref inc) = request.include {
             cmd.args(["--glob", inc]);
         }
-        cmd.args(["--max-count", &request.max_results.to_string()]);
+        let capped_max = request.max_results.min(10_000);
+        cmd.args(["--max-count", &capped_max.to_string()]);
         cmd.arg("--").arg(&request.pattern).arg(&request.path);
 
         let output = cmd.output().await.map_err(|e| TyclawError::Tool {

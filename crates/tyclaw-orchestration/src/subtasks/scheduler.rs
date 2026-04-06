@@ -221,7 +221,7 @@ impl DagScheduler {
             }
 
             // 为 ready 节点启动并发执行
-            eprintln!("[scheduler] spawning {} ready nodes", ready_nodes.len());
+            tracing::debug!(count = ready_nodes.len(), "Scheduler spawning ready nodes");
             for node in ready_nodes {
                 let executor = Arc::clone(&self.executor);
                 let sem = Arc::clone(&semaphore);
@@ -241,13 +241,13 @@ impl DagScheduler {
                 let main_ctx_owned = main_context.map(|s| s.to_string());
                 // 捕获当前 sandbox scope（task_local 不跨 spawn 传递，需要手动传）
                 let sandbox_for_spawn = tyclaw_sandbox::current_sandbox();
-                eprintln!("[scheduler] spawning task: {}", node_id);
+                tracing::debug!(node_id = %node_id, "Scheduler spawning task");
                 join_set.spawn(async move {
                     // 在 spawned task 中重建 sandbox scope
                     let inner = async {
-                    eprintln!("[scheduler:{}] task started, acquiring semaphore", node_id);
+                    tracing::debug!(node_id = %node_id, "Task started, acquiring semaphore");
                     let _permit = sem.acquire().await.expect("semaphore closed");
-                    eprintln!("[scheduler:{}] semaphore acquired, executing", node_id);
+                    tracing::debug!(node_id = %node_id, "Semaphore acquired, executing");
 
                     // 收集上游输出
                     let upstream: Vec<(String, String)> = {

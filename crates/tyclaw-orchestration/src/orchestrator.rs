@@ -729,7 +729,7 @@ impl Orchestrator {
                 target: "prompt.assembly",
                 workspace_id = workspace_id,
                 user_id = user_id,
-                prompt = %serde_json::to_string_pretty(&initial_messages).unwrap_or_default(),
+                prompt = %serde_json::to_string(&initial_messages).unwrap_or_default(),
                 "Assembled messages for LLM",
             );
         }
@@ -746,7 +746,7 @@ impl Orchestrator {
                     started_at: start,
                 },
             );
-            self.write_active_tasks_file(&tasks);
+            // 不在开始时写磁盘，只在任务完成/失败时写一次（减少 IO）
         }
 
         // 9. 运行 Agent 执行引擎

@@ -348,7 +348,13 @@ fn extract_dispatch_summary(output: &str) -> (String, Option<DispatchStructuredS
 
     let json_start = start_idx + DISPATCH_SUMMARY_START.len();
     let json_slice = output[json_start..end_idx].trim();
-    let summary = serde_json::from_str::<DispatchStructuredSummary>(json_slice).ok();
+    let summary = match serde_json::from_str::<DispatchStructuredSummary>(json_slice) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse dispatch summary JSON");
+            None
+        }
+    };
 
     let mut clean = String::new();
     clean.push_str(output[..start_idx].trim_end());

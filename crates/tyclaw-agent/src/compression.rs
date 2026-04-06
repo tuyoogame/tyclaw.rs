@@ -29,9 +29,9 @@ pub(crate) fn compress_tool_results(
     light_keep_recent_rounds: usize,
     protected_prefix_len: usize,
 ) -> Vec<HashMap<String, Value>> {
-    // 跳过压缩时保留完整上下文让 LLM 知道自己看过什么
+    // 跳过压缩时直接返回引用的 clone（不做任何处理）
     if skip_compression {
-        return messages.to_vec();
+        return Vec::from(messages);
     }
     // 按 assistant(tool_calls) 估算轮次边界，最近 N 轮尽量不压缩。
     let assistant_round_indices_forward: Vec<usize> = messages
@@ -182,9 +182,9 @@ pub(crate) fn compress_tool_results(
                                     compress_args_summary(tool_name, args_str)
                                 };
                                 if let Some(compressed) = new_args {
-                                    func.as_object_mut()
-                                        .unwrap()
-                                        .insert("arguments".into(), json!(compressed));
+                                    if let Some(obj) = func.as_object_mut() {
+                                        obj.insert("arguments".into(), json!(compressed));
+                                    }
                                 }
                             }
                         }

@@ -98,14 +98,24 @@ pub(crate) struct ExplorePhaseAfterTools {
     pub nudge_messages: Vec<HashMap<String, Value>>,
 }
 
-/// 探索阶段：检测是否应切换到产出阶段。
+/// 探索阶段：检测是否应切换到产出阶段，接近预算时注入提醒。
 pub(crate) fn explore_phase_after_tools(
-    _exploration_iterations: usize,
-    _explore_max: usize,
+    exploration_iterations: usize,
+    explore_max: usize,
     has_production: bool,
 ) -> ExplorePhaseAfterTools {
+    let mut nudge_messages = vec![];
+
+    // 接近探索预算上限时注入提醒，让 LLM 尽快转入产出
+    if !has_production && explore_max > 0 && exploration_iterations >= explore_max.saturating_sub(2) {
+        nudge_messages.push(crate::runtime::chat_message(
+            "system",
+            &crate::nudge_loader::explore_budget_warning(exploration_iterations, explore_max),
+        ));
+    }
+
     ExplorePhaseAfterTools {
         transition_to_produce: has_production,
-        nudge_messages: vec![],
+        nudge_messages,
     }
 }

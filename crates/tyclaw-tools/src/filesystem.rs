@@ -200,7 +200,8 @@ fn safe_resolve(path: &str, workspace: Option<&Path>) -> Result<PathBuf, String>
     let canonical = canonicalize_best_effort(&resolved)?;
 
     if let Some(ws) = workspace {
-        let canonical_ws = ws.canonicalize().unwrap_or_else(|_| ws.to_path_buf());
+        let canonical_ws = ws.canonicalize()
+            .map_err(|e| format!("Error: workspace not accessible: {e}"))?;
         if !canonical.starts_with(&canonical_ws) {
             return Err(format!(
                 "Error: Path must be within workspace: {}",
@@ -599,7 +600,10 @@ impl Tool for EditFileTool {
                 }
                 content.replacen(&*old_text, &new_text, 1)
             };
-            let pos = content.find(&*old_text).unwrap();
+            let pos = match content.find(&*old_text) {
+                Some(p) => p,
+                None => return format!("Error: old_text disappeared unexpectedly in {path}"),
+            };
             let start_line = content[..pos].matches('\n').count() + 1;
             let old_lines = old_text.lines().count().max(1);
             let new_lines = new_text.lines().count().max(1);

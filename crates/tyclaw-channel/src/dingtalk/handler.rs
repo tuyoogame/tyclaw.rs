@@ -498,8 +498,14 @@ pub async fn download_file(
         .await
         .map_err(|e| format!("Create dir error: {e}"))?;
 
+    // 防止路径穿越：只取文件名部分，过滤 ../ 等
+    let safe_name = std::path::Path::new(file_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("downloaded_file");
+
     // 流式写入磁盘，不缓冲整个文件到内存
-    let save_path = save_dir.join(file_name);
+    let save_path = save_dir.join(safe_name);
     let mut file = tokio::fs::File::create(&save_path)
         .await
         .map_err(|e| format!("Create file error: {e}"))?;

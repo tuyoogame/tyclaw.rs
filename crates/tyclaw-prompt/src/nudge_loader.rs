@@ -21,3 +21,10 @@ pub fn idle_spin() -> String {
 pub fn param_error_retry() -> String {
     crate::prompt_store::get_nudge("param_error_retry")
 }
+
+pub fn explore_budget_warning(current: usize, max: usize) -> String {
+    let template = crate::prompt_store::get_nudge("explore_budget_warning");
+    template
+        .replace("{current}", &current.to_string())
+        .replace("{max}", &max.to_string())
+}

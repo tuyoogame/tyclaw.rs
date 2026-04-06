@@ -10,10 +10,19 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 /// 钉钉应用凭证。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Credential {
     pub client_id: String,
     pub client_secret: String,
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credential")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"***")
+            .finish()
+    }
 }
 
 impl Credential {
