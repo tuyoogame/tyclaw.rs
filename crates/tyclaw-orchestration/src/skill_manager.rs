@@ -252,29 +252,61 @@ impl SkillManager {
     ///
     /// 目录结构：works/{bucket}/{workspace_key}/skills/{skill_name}/SKILL.md
     pub fn scan_workspace_skills(&self, workspace_key: &str) -> Vec<SkillMeta> {
-        let user_dir = tyclaw_control::workspace_path(&self.root, workspace_key).join("skills");
-        if !user_dir.is_dir() {
-            return Vec::new();
-        }
-
+        let ws_root = tyclaw_control::workspace_path(&self.root, workspace_key);
         let mut skills = Vec::new();
-        let mut entries: Vec<_> = std::fs::read_dir(&user_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .collect();
-        entries.sort_by_key(|e| e.file_name());
 
-        for entry in entries {
-            if let Some(mut skill) = scan_skill_dir(&entry.path()) {
-                skill.status = "workspace".into();
-                skill.creator = Some(workspace_key.to_string());
-                skills.push(skill);
+        // 标准路径：skills/（新版 skill-creator 创建到此）
+        let user_dir = ws_root.join("skills");
+        if user_dir.is_dir() {
+            let mut entries: Vec<_> = std::fs::read_dir(&user_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                if let Some(mut skill) = scan_skill_dir(&entry.path()) {
+                    skill.status = "workspace".into();
+                    skill.creator = Some(workspace_key.to_string());
+                    skills.push(skill);
+                }
             }
         }
 
+        // 兼容旧版：work/_personal/ 下的 skill（旧版 skill-creator 创建到此路径）
+        let personal_dir = ws_root.join("work").join("_personal");
+        if personal_dir.is_dir() {
+            Self::scan_personal_skills_recursive(&personal_dir, workspace_key, &mut skills);
+        }
+
         skills
+    }
+
+    /// 递归扫描 _personal/ 目录下的 skill（兼容旧版数据，目录结构可能嵌套多层）。
+    fn scan_personal_skills_recursive(
+        dir: &Path,
+        workspace_key: &str,
+        results: &mut Vec<SkillMeta>,
+    ) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.join("SKILL.md").exists() {
+                    if let Some(mut skill) = scan_skill_dir(&path) {
+                        skill.status = "personal".into();
+                        skill.creator = Some(workspace_key.to_string());
+                        results.push(skill);
+                    }
+                } else {
+                    Self::scan_personal_skills_recursive(&path, workspace_key, results);
+                }
+            }
+        }
     }
 
     /// 获取 workspace 可用的能力列表（全局 + workspace 私有合并）。
