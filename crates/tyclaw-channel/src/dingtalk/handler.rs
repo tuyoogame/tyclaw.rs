@@ -15,8 +15,8 @@ use super::message::{CallbackMessage, ChatbotMessage};
 
 /// 单张图片最大字节数（5MB），超过则跳过。
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
-/// 单个文件最大字节数（20MB），超过则跳过。
-const MAX_FILE_BYTES: usize = 20 * 1024 * 1024;
+/// 单个文件最大字节数（500MB）。大文件流式写入磁盘，不经过内存缓冲。
+const MAX_FILE_BYTES: usize = 500 * 1024 * 1024;
 
 /// 聊天机器人消息处理器 trait。
 ///
@@ -474,7 +474,7 @@ pub async fn download_file(
 
     let file_resp = client
         .get(download_url)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(600))
         .send()
         .await
         .map_err(|e| format!("File download HTTP error: {e}"))?;
@@ -484,31 +484,51 @@ pub async fn download_file(
         return Err(format!("File download failed: {status}"));
     }
 
-    let bytes = file_resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Read file bytes error: {e}"))?;
-
-    if bytes.len() > MAX_FILE_BYTES {
-        return Err(format!(
-            "File too large: {} bytes (max {})",
-            bytes.len(),
-            MAX_FILE_BYTES
-        ));
+    // 先用 Content-Length 检查大小（避免下载后才发现超限）
+    if let Some(content_length) = file_resp.content_length() {
+        if content_length as usize > MAX_FILE_BYTES {
+            return Err(format!(
+                "File too large: {} bytes (max {})",
+                content_length, MAX_FILE_BYTES
+            ));
+        }
     }
 
     tokio::fs::create_dir_all(save_dir)
         .await
         .map_err(|e| format!("Create dir error: {e}"))?;
 
+    // 流式写入磁盘，不缓冲整个文件到内存
     let save_path = save_dir.join(file_name);
-    tokio::fs::write(&save_path, &bytes)
+    let mut file = tokio::fs::File::create(&save_path)
         .await
-        .map_err(|e| format!("Write file error: {e}"))?;
+        .map_err(|e| format!("Create file error: {e}"))?;
+
+    let mut stream = file_resp.bytes_stream();
+    let mut total_bytes: usize = 0;
+    use tokio::io::AsyncWriteExt;
+    use futures_util::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Stream read error: {e}"))?;
+        total_bytes += chunk.len();
+        if total_bytes > MAX_FILE_BYTES {
+            // 超限：删除半截文件
+            drop(file);
+            let _ = tokio::fs::remove_file(&save_path).await;
+            return Err(format!(
+                "File too large: {} bytes downloaded (max {})",
+                total_bytes, MAX_FILE_BYTES
+            ));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("Write chunk error: {e}"))?;
+    }
+    file.flush().await.map_err(|e| format!("Flush error: {e}"))?;
 
     info!(
         file_name = %file_name,
-        size = bytes.len(),
+        size = total_bytes,
         "File downloaded and saved"
     );
 

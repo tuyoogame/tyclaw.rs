@@ -6,7 +6,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::context_state::{AgentPhase, ContextManager};
-use crate::loop_helpers::{FIRST_TURN_STATE_SNAPSHOT_CHARS, STATE_SNAPSHOT_CHARS};
+// STATE_VIEW 暂时禁用
+// use crate::loop_helpers::{FIRST_TURN_STATE_SNAPSHOT_CHARS, STATE_SNAPSHOT_CHARS};
 
 /// 每轮迭代前：根据阶段与历史工具使用更新 `ContextManager` 的 phase / focus / plan。
 pub(crate) fn sync_context_state_for_iteration(
