@@ -59,11 +59,20 @@ impl NodeExecutor {
         routing: RoutingPolicy,
         app: Arc<AppContext>,
     ) -> Self {
+        Self::with_max_iterations(providers, routing, app, SUB_AGENT_MAX_ITERATIONS)
+    }
+
+    pub fn with_max_iterations(
+        providers: HashMap<String, Arc<dyn LLMProvider>>,
+        routing: RoutingPolicy,
+        app: Arc<AppContext>,
+        max_iterations: usize,
+    ) -> Self {
         Self {
             providers,
             routing,
             app,
-            max_iterations: SUB_AGENT_MAX_ITERATIONS,
+            max_iterations,
         }
     }
 

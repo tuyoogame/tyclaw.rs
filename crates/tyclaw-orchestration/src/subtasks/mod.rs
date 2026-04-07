@@ -152,10 +152,11 @@ impl SubtasksEngine {
             RuleReducer::new()
         };
 
-        let executor = Arc::new(NodeExecutor::new(
+        let executor = Arc::new(NodeExecutor::with_max_iterations(
             providers,
             routing.clone(),
             app.clone(),
+            config.sub_agent_max_iterations,
         ));
 
         info!(

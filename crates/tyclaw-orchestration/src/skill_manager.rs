@@ -139,20 +139,26 @@ fn scan_skill_dir(skill_dir: &Path) -> Option<SkillMeta> {
 /// 2. Workspace 技能：`{root}/works/{bucket}/{key}/skills/{skill_name}/SKILL.md`
 pub struct SkillManager {
     builtin_dir: PathBuf,
-    /// workspace 根目录，用于计算 workspace skills 路径
-    root: PathBuf,
+    /// works 目录，用于计算 workspace skills 路径（默认 {root}/works，可通过 --works-dir 覆盖）
+    works_dir: Mutex<PathBuf>,
     builtin_cache: Mutex<Vec<SkillMeta>>,
     builtin_mtime: Mutex<f64>,
 }
 
 impl SkillManager {
     pub fn new(builtin_dir: PathBuf, root: PathBuf) -> Self {
+        let works_dir = root.join("works");
         Self {
             builtin_dir,
-            root,
+            works_dir: Mutex::new(works_dir),
             builtin_cache: Mutex::new(Vec::new()),
             builtin_mtime: Mutex::new(0.0),
         }
+    }
+
+    /// 覆盖 works 目录路径（对应 --works-dir 命令行参数）。
+    pub fn set_works_dir(&self, path: PathBuf) {
+        *self.works_dir.lock() = path;
     }
 
     /// 获取内建技能目录下所有 SKILL.md 的最新修改时间。
@@ -252,7 +258,8 @@ impl SkillManager {
     ///
     /// 目录结构：works/{bucket}/{workspace_key}/skills/{skill_name}/SKILL.md
     pub fn scan_workspace_skills(&self, workspace_key: &str) -> Vec<SkillMeta> {
-        let ws_root = tyclaw_control::workspace_path(&self.root, workspace_key);
+        let works_dir = self.works_dir.lock().clone();
+        let ws_root = tyclaw_control::workspace_path_in(&works_dir, workspace_key);
         let mut skills = Vec::new();
 
         // 标准路径：skills/（新版 skill-creator 创建到此）

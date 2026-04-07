@@ -42,6 +42,10 @@ pub struct SubtasksConfig {
     #[serde(default)]
     pub routing_rules: Vec<RoutingRuleConfig>,
 
+    /// 子 agent 最大迭代次数。
+    #[serde(default = "default_sub_agent_max_iterations")]
+    pub sub_agent_max_iterations: usize,
+
     /// 无规则匹配时的默认模型。
     #[serde(default)]
     pub default_model: Option<String>,
@@ -95,6 +99,7 @@ impl Default for SubtasksConfig {
             max_concurrency: default_max_concurrency(),
             failure_policy: FailurePolicy::default(),
             default_timeout_ms: default_timeout_ms(),
+            sub_agent_max_iterations: default_sub_agent_max_iterations(),
             routing_rules: vec![],
             default_model: None,
             providers: std::collections::HashMap::new(),
@@ -131,6 +136,9 @@ fn default_max_concurrency() -> usize {
 }
 fn default_timeout_ms() -> u64 {
     120_000
+}
+fn default_sub_agent_max_iterations() -> usize {
+    40
 }
 fn default_thinking_effort() -> String {
     "high".into()

@@ -170,7 +170,8 @@ impl Orchestrator {
 
     /// 覆盖 works 目录路径（对应 --works-dir 命令行参数）。
     pub fn set_works_dir(&mut self, path: std::path::PathBuf) {
-        self.persistence.workspace_mgr.set_works_dir(path);
+        self.persistence.workspace_mgr.set_works_dir(&path);
+        self.persistence.skills.set_works_dir(path);
     }
 
     /// 设置沙箱池（启动时由 main.rs 注入）。

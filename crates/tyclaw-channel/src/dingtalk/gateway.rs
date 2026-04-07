@@ -55,6 +55,15 @@ impl GatewayClient {
         let (write, mut read) = ws_stream.split();
         let write = Arc::new(Mutex::new(write));
 
+        // 注册 label，网关要求 10s 内完成
+        {
+            let mut w = write.lock().await;
+            w.send(WsMessage::Text(r#"{"type":"register","label":"rust"}"#.into()))
+                .await
+                .map_err(|e| format!("Failed to send register: {e}"))?;
+            info!("Gateway: register sent (label=rust)");
+        }
+
         // 心跳：每 30 秒发一次
         let write_hb = write.clone();
         let heartbeat_task = tokio::spawn(async move {
