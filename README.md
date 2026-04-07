@@ -5,6 +5,12 @@
 - 优秀的企业Agent基建底座，创建和沉淀Skill技能，实现企业内部AI工作流定制化
 - 充分考虑成本（多模型配合）,安全（审计日志，安全配置，沙箱隔离）等痛点
 
+## Demo
+
+![Demo Screenshot](demo/demo.png)
+
+![Demo](demo/demo.gif)
+
 ## 技术特点
 
 - **Rust 全栈** — 多 crate 模块化设计，类型安全，Tokio 异步运行时，per-session 串行 + 跨 session 并发
