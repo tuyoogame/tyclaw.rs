@@ -244,6 +244,73 @@ impl Tool for ReadFileTool {
          Always use this before editing a file, and prefer this over exec cat/head/tail."
     }
 
+    /// read_file 输出压缩：合并连续空行，大文件时去掉纯注释块
+    fn compress_output(&self, output: &str, params: &HashMap<String, Value>) -> String {
+        let lines: Vec<&str> = output.lines().collect();
+        // 小文件不压缩
+        if lines.len() < 100 {
+            return output.to_string();
+        }
+
+        // 检测文件类型（从 path 参数推断）
+        let path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let is_code = path.ends_with(".rs")
+            || path.ends_with(".py")
+            || path.ends_with(".js")
+            || path.ends_with(".ts")
+            || path.ends_with(".go")
+            || path.ends_with(".java")
+            || path.ends_with(".c")
+            || path.ends_with(".cpp");
+
+        let mut result: Vec<&str> = Vec::new();
+        let mut consecutive_empty = 0u32;
+        let mut in_block_comment = false;
+        let mut block_comment_lines = 0u32;
+
+        for line in &lines {
+            // LINE_NUMBER|CONTENT 格式，提取 content 部分
+            let content = line.split_once('|').map(|(_, c)| c).unwrap_or(line);
+            let trimmed = content.trim();
+
+            // 合并连续空行（最多保留 1 行）
+            if trimmed.is_empty() {
+                consecutive_empty += 1;
+                if consecutive_empty <= 1 {
+                    result.push(line);
+                }
+                continue;
+            }
+            consecutive_empty = 0;
+
+            // 代码文件：压缩大段块注释（超过 5 行的注释块只保留首尾）
+            if is_code {
+                if trimmed.starts_with("/*") || trimmed.starts_with("/**") || trimmed.starts_with("\"\"\"") || trimmed.starts_with("'''") {
+                    in_block_comment = true;
+                    block_comment_lines = 0;
+                }
+                if in_block_comment {
+                    block_comment_lines += 1;
+                    if block_comment_lines <= 2 {
+                        result.push(line);
+                    } else if trimmed.ends_with("*/") || trimmed.ends_with("\"\"\"") || trimmed.ends_with("'''") {
+                        result.push(&"     |  ... (comment block)");
+                        result.push(line);
+                        in_block_comment = false;
+                    }
+                    continue;
+                }
+            }
+
+            result.push(line);
+        }
+
+        result.join("\n")
+    }
+
     /// 参数 Schema：path（必填）、offset（可选，起始行号，从1开始）、limit（可选，读取行数）
     fn parameters(&self) -> Value {
         json!({

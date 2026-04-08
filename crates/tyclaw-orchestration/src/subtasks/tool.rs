@@ -33,6 +33,9 @@ struct DispatchStructuredSummary {
     has_conflicts: bool,
     wall_time_ms: u64,
     nodes: Vec<DispatchNodeSummary>,
+    /// 所有子 agent 使用的 skill 汇总（用于 audit 统计）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skills_used: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -442,6 +445,7 @@ impl Tool for DispatchSubtasksTool {
                     has_conflicts: false,
                     wall_time_ms: duration_ms,
                     nodes: vec![build_dispatch_node_summary(&record, display_path.clone())],
+                    skills_used: record.skills_used.clone(),
                 };
 
                 let preview = if output.len() > 300 {
@@ -470,6 +474,7 @@ impl Tool for DispatchSubtasksTool {
                     has_conflicts: false,
                     wall_time_ms: duration_ms,
                     nodes: vec![build_dispatch_node_summary(&record, display_path.clone())],
+                    skills_used: record.skills_used.clone(),
                 };
 
                 append_dispatch_summary_metadata(
@@ -599,18 +604,21 @@ impl Tool for DispatchSubtasksTool {
             let display_path = write_dispatch_file(&detail_file, &detail_content, &dispatch_dir);
             structured_nodes.push(build_dispatch_node_summary(rec, display_path.clone()));
 
-            // 输出的前 200 chars 作为预览
-            let preview = if output.len() > 200 {
-                let boundary = output.floor_char_boundary(200);
-                format!("{}...", &output[..boundary])
+            // 内联子任务输出（≤2000 chars 直接展示，超出截断并提供 detail 文件路径）
+            const INLINE_MAX_CHARS: usize = 2000;
+            if output.len() <= INLINE_MAX_CHARS {
+                result.push_str(&format!(
+                    "{} **{}** ({:.0}s, {} tools):\n{}\n\n",
+                    status_icon, rec.node_id, duration_s, tools_count, output,
+                ));
             } else {
-                output.to_string()
-            };
-
-            result.push_str(&format!(
-                "{} **{}** ({:.0}s, {} tools): {}\n   Detail: `{}`\n\n",
-                status_icon, rec.node_id, duration_s, tools_count, preview, display_path,
-            ));
+                let boundary = output.floor_char_boundary(INLINE_MAX_CHARS);
+                result.push_str(&format!(
+                    "{} **{}** ({:.0}s, {} tools):\n{}...\n   (full output: `{}`)\n\n",
+                    status_icon, rec.node_id, duration_s, tools_count,
+                    &output[..boundary], display_path,
+                ));
+            }
         }
 
         let hint = super::prompt_loader::dispatch_multi_result_hint();
@@ -620,6 +628,12 @@ impl Tool for DispatchSubtasksTool {
             total_duration_ms as f64 / 1000.0,
             hint.trim(),
         ));
+        // 汇总所有子 agent 的 skill 使用记录
+        let all_sub_skills: Vec<serde_json::Value> = records
+            .iter()
+            .flat_map(|r| r.skills_used.iter().cloned())
+            .collect();
+
         let summary = DispatchStructuredSummary {
             plan_id: plan.id.clone(),
             succeeded,
@@ -628,6 +642,7 @@ impl Tool for DispatchSubtasksTool {
             has_conflicts: report.has_conflicts,
             wall_time_ms: total_duration_ms,
             nodes: structured_nodes,
+            skills_used: all_sub_skills,
         };
 
         append_dispatch_summary_metadata(result, &summary)

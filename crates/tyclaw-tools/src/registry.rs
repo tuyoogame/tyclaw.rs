@@ -154,6 +154,7 @@ impl ToolRegistry {
         }
 
         debug!(tool = name, keys = ?params.keys().collect::<Vec<_>>(), "Executing tool");
+        let params_for_compress = params.clone();
         let mut result = self.executor.execute(tool.as_ref(), name, params).await;
 
         // 如果工具执行返回错误，追加引导信息
@@ -163,6 +164,19 @@ impl ToolRegistry {
                 result.status = "error".into();
             }
         }
+
+        // 工具级输出压缩（各工具可覆盖 compress_output 实现定制策略）
+        let original_len = result.output.len();
+        result.output = tool.compress_output(&result.output, &params_for_compress);
+        if result.output.len() < original_len {
+            debug!(
+                tool = name,
+                original = original_len,
+                compressed = result.output.len(),
+                "Tool output compressed"
+            );
+        }
+
         result
     }
 }

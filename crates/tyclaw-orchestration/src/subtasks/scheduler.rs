@@ -132,6 +132,7 @@ impl DagScheduler {
                             tool_events: Vec::new(),
                             decision_events: Vec::new(),
                             diagnostics_summary: None,
+                            skills_used: Vec::new(),
                         });
                     }
                     break;
@@ -196,6 +197,7 @@ impl DagScheduler {
                         tool_events: Vec::new(),
                         decision_events: Vec::new(),
                         diagnostics_summary: None,
+                        skills_used: Vec::new(),
                     });
                 }
             }
@@ -277,6 +279,7 @@ impl DagScheduler {
                                 tool_events: Vec::new(),
                                 decision_events: Vec::new(),
                                 diagnostics_summary: None,
+                            skills_used: Vec::new(),
                             }
                         }
                     };

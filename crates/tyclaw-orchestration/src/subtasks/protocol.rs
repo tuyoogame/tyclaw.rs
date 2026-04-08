@@ -88,6 +88,9 @@ pub struct ExecutionRecord {
     /// 子 agent 的工具诊断摘要。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics_summary: Option<RunDiagnosticsSummary>,
+    /// 子 agent 使用的 skill 列表（从 messages 中提取）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills_used: Vec<serde_json::Value>,
 }
 
 /// Reducer 输出的归并报告。

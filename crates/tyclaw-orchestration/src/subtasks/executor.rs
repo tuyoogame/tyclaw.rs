@@ -154,8 +154,8 @@ impl NodeExecutor {
             node.id
         ));
 
-        // 构建初始消息
-        let messages = build_messages(node, upstream_outputs, &self.app.workspace, dispatch_dir);
+        // 构建初始消息（workspace context 直接内联，不再通过 main_llm.md 中转）
+        let messages = build_messages(node, upstream_outputs, &self.app.workspace, dispatch_dir, &ctx_content);
         Self::log(&format!(
             "[sub-agent:{}] messages={} msgs, starting agent.run()",
             node.id,
@@ -217,6 +217,13 @@ impl NodeExecutor {
                     "Sub-agent completed successfully"
                 );
 
+                // 从子 agent messages 中提取 skill 使用记录
+                let sub_skills = crate::helpers::extract_skills_used(
+                    &runtime_result.messages,
+                    &node.id,
+                    &format!("sub:{}", node.id),
+                );
+
                 // snapshot 开启时记录完整消息历史
                 let messages = if self.app.write_snapshot {
                     Some(runtime_result.messages)
@@ -236,7 +243,7 @@ impl NodeExecutor {
                 ExecutionRecord {
                     node_id: node.id.clone(),
                     model,
-                    input_tokens: 0, // AgentLoop 内部消耗，暂无法精确统计
+                    input_tokens: 0,
                     output_tokens: 0,
                     duration_ms,
                     status: NodeStatus::Success,
@@ -248,6 +255,7 @@ impl NodeExecutor {
                     tool_events: runtime_result.tool_events,
                     decision_events: runtime_result.decision_events,
                     diagnostics_summary: Some(runtime_result.diagnostics_summary),
+                    skills_used: sub_skills,
                 }
             }
             Err(e) => {
@@ -274,6 +282,7 @@ impl NodeExecutor {
                     tool_events: Vec::new(),
                     decision_events: Vec::new(),
                     diagnostics_summary: None,
+                    skills_used: Vec::new(),
                 }
             }
         }
@@ -634,32 +643,22 @@ fn build_messages(
     upstream_outputs: &[(String, String)],
     workspace: &std::path::Path,
     dispatch_dir: &std::path::Path,
+    workspace_context: &str,
 ) -> Vec<HashMap<String, Value>> {
     // 统一路径变量：有 sandbox → 容器路径，无 → host 绝对路径
-    let (display_ws, display_ctx) = if let Some(sandbox) = tyclaw_sandbox::current_sandbox() {
-        let ws = sandbox.workspace_root().to_string();
-        let dispatch_rel = dispatch_container_rel(dispatch_dir);
-        let ctx = format!("{}/{}/{}", ws, dispatch_rel, WORKSPACE_CONTEXT_FILENAME);
-        (ws, ctx)
+    let display_ws = if let Some(sandbox) = tyclaw_sandbox::current_sandbox() {
+        sandbox.workspace_root().to_string()
     } else {
-        let abs = workspace
+        workspace
             .canonicalize()
-            .unwrap_or_else(|_| workspace.to_path_buf());
-        let abs_dispatch = dispatch_dir
-            .canonicalize()
-            .unwrap_or_else(|_| dispatch_dir.to_path_buf());
-        (
-            abs.display().to_string(),
-            abs_dispatch
-                .join(WORKSPACE_CONTEXT_FILENAME)
-                .display()
-                .to_string(),
-        )
+            .unwrap_or_else(|_| workspace.to_path_buf())
+            .display()
+            .to_string()
     };
 
     let ws_hint = super::prompt_loader::workspace_hint()
         .replace("{workspace}", &display_ws)
-        .replace("{context_file}", &display_ctx);
+        .replace("{context_file}", "(see below)");
 
     // user prompt：上游 context + 任务指令 + 验收标准
     let mut parts = Vec::new();
@@ -709,10 +708,16 @@ fn build_messages(
             system_prompt_for_node_type(&node.node_type),
             "[[CACHE_BOUNDARY]]".to_string(),
         ],
-        user_context: vec![PromptContextEntry {
-            label: "Workspace Hint".to_string(),
-            content: ws_hint,
-        }],
+        user_context: vec![
+            PromptContextEntry {
+                label: "Workspace Hint".to_string(),
+                content: ws_hint,
+            },
+            PromptContextEntry {
+                label: "Main LLM Context".to_string(),
+                content: workspace_context.to_string(),
+            },
+        ],
         system_context: Vec::new(),
     };
 

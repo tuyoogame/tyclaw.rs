@@ -77,6 +77,20 @@ pub trait Tool: Send + Sync {
     ) -> String {
         self.execute(params).await
     }
+
+    /// 压缩工具执行结果，减少 LLM token 消耗。
+    ///
+    /// 各工具可覆盖此方法实现定制压缩策略（参考 RTK 模式）：
+    /// - exec：按命令类型压缩（测试输出只保留失败、编译去掉进度行等）
+    /// - read_file：去掉注释和空行
+    /// - grep：限制每文件匹配数、截断长行
+    /// - list_dir：去掉权限/时间戳
+    ///
+    /// `params` 为原始调用参数，供判断命令类型等上下文信息。
+    /// 默认实现：不压缩，原样返回。
+    fn compress_output(&self, output: &str, _params: &HashMap<String, Value>) -> String {
+        output.to_string()
+    }
 }
 
 /// 根据 JSON Schema 中声明的属性类型，自动转换参数类型。

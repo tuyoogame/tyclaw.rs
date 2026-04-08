@@ -601,6 +601,53 @@ impl Tool for GrepSearchTool {
         })
     }
 
+    /// grep 输出压缩：截断超长行，限制每文件匹配数
+    fn compress_output(&self, output: &str, _params: &HashMap<String, Value>) -> String {
+        const MAX_LINE_CHARS: usize = 300;
+        const MAX_MATCHES_PER_FILE: usize = 15;
+
+        let lines: Vec<&str> = output.lines().collect();
+        if lines.len() < 30 {
+            return output.to_string();
+        }
+
+        let mut result: Vec<String> = Vec::new();
+        let mut current_file = String::new();
+        let mut file_match_count = 0u32;
+        let mut file_overflow = 0u32;
+
+        for line in &lines {
+            if let Some(colon_pos) = line.find(':') {
+                let file_part = &line[..colon_pos];
+                if file_part.contains('/') || file_part.contains('.') {
+                    if file_part != current_file {
+                        if file_overflow > 0 {
+                            result.push(format!("  ... +{file_overflow} more matches"));
+                        }
+                        current_file = file_part.to_string();
+                        file_match_count = 0;
+                        file_overflow = 0;
+                    }
+                    file_match_count += 1;
+                    if file_match_count > MAX_MATCHES_PER_FILE as u32 {
+                        file_overflow += 1;
+                        continue;
+                    }
+                }
+            }
+            if line.len() > MAX_LINE_CHARS {
+                let boundary = line.char_indices().nth(MAX_LINE_CHARS).map(|(i, _)| i).unwrap_or(line.len());
+                result.push(format!("{}...", &line[..boundary]));
+            } else {
+                result.push(line.to_string());
+            }
+        }
+        if file_overflow > 0 {
+            result.push(format!("  ... +{file_overflow} more matches"));
+        }
+        result.join("\n")
+    }
+
     fn should_sandbox(&self) -> bool {
         true
     }

@@ -177,9 +177,10 @@ pub(crate) fn compute_context_budget_plan(query: &str) -> ContextBudgetPlan {
 
 /// 从 agent loop 的 messages 中提取实际被调用的 skill 记录。
 ///
-/// 检测两种调用方式：
+/// 检测三种来源：
 /// - **工具型 skill**：exec 调用 `tool.py`/`tool.sh`
 /// - **提示型 skill**：read_file 读取 `SKILL.md`
+/// - **子 agent skill**：dispatch_subtasks 返回的结构化摘要中包含的 skills_used
 ///
 /// 只记录有明确调用/读取证据的 skill，不含仅注入 prompt 摘要但未实际使用的。
 pub fn extract_skills_used(
@@ -191,39 +192,60 @@ pub fn extract_skills_used(
     let mut seen = HashSet::new();
 
     for msg in messages {
-        if msg.get("role").and_then(|v| v.as_str()) != Some("assistant") {
-            continue;
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+
+        // 从 assistant tool_calls 中提取（主 agent 的 exec/read_file）
+        if role == "assistant" {
+            if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                for tc in tool_calls {
+                    let tool_name = tc
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
+                    let args_str = tc
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("");
+
+                    let extracted = match tool_name {
+                        "exec" => extract_skill_from_exec(args_str),
+                        "read_file" => extract_skill_from_read(args_str),
+                        _ => None,
+                    };
+
+                    if let Some((skill_name, invoke_type)) = extracted {
+                        if seen.insert(skill_name.clone()) {
+                            skills.push(serde_json::json!({
+                                "skill": skill_name,
+                                "type": invoke_type,
+                                "workspace_key": workspace_key,
+                                "user_name": user_name,
+                            }));
+                        }
+                    }
+                }
+            }
         }
-        let tool_calls = match msg.get("tool_calls").and_then(|v| v.as_array()) {
-            Some(tc) => tc,
-            None => continue,
-        };
-        for tc in tool_calls {
-            let tool_name = tc
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("");
-            let args_str = tc
-                .get("function")
-                .and_then(|f| f.get("arguments"))
-                .and_then(|a| a.as_str())
-                .unwrap_or("");
 
-            let extracted = match tool_name {
-                "exec" => extract_skill_from_exec(args_str),
-                "read_file" => extract_skill_from_read(args_str),
-                _ => None,
-            };
-
-            if let Some((skill_name, invoke_type)) = extracted {
-                if seen.insert(skill_name.clone()) {
-                    skills.push(serde_json::json!({
-                        "skill": skill_name,
-                        "type": invoke_type,
-                        "workspace_key": workspace_key,
-                        "user_name": user_name,
-                    }));
+        // 从 tool result 中提取子 agent 的 skill 使用（dispatch_subtasks 返回的摘要）
+        if role == "tool" {
+            if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                if let Some(start) = content.find("[[TYCLAW_DISPATCH_SUMMARY]]") {
+                    if let Some(end) = content.find("[[/TYCLAW_DISPATCH_SUMMARY]]") {
+                        let json_str = &content[start + "[[TYCLAW_DISPATCH_SUMMARY]]".len()..end].trim();
+                        if let Ok(summary) = serde_json::from_str::<Value>(json_str) {
+                            if let Some(sub_skills) = summary.get("skills_used").and_then(|v| v.as_array()) {
+                                for s in sub_skills {
+                                    let name = s.get("skill").and_then(|v| v.as_str()).unwrap_or("");
+                                    if !name.is_empty() && seen.insert(name.to_string()) {
+                                        skills.push(s.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
