@@ -263,6 +263,97 @@ pub async fn reply_markdown(
     post_webhook(client, &message.session_webhook, &payload, "reply_markdown").await
 }
 
+/// 给用户消息添加表情回复（Emotion API）。
+///
+/// 在用户的原始消息上贴一个表情气泡，不发新消息。
+/// 使用钉钉 `/v1.0/robot/emotion/reply` 接口。
+pub async fn emotion_reply(
+    client: &Client,
+    token: &str,
+    robot_code: &str,
+    message: &ChatbotMessage,
+    emotion_name: &str,
+) -> bool {
+    emotion_call(client, token, robot_code, message, emotion_name, "reply").await
+}
+
+/// 撤回表情回复。
+///
+/// 使用钉钉 `/v1.0/robot/emotion/recall` 接口。
+pub async fn emotion_recall(
+    client: &Client,
+    token: &str,
+    robot_code: &str,
+    message: &ChatbotMessage,
+    emotion_name: &str,
+) -> bool {
+    emotion_call(client, token, robot_code, message, emotion_name, "recall").await
+}
+
+async fn emotion_call(
+    client: &Client,
+    token: &str,
+    robot_code: &str,
+    message: &ChatbotMessage,
+    emotion_name: &str,
+    endpoint: &str,
+) -> bool {
+    if message.conversation_id.is_empty() || message.msg_id.is_empty() {
+        warn!(endpoint = %endpoint, "Emotion skipped: empty conversationId or msgId");
+        return false;
+    }
+
+    info!(
+        endpoint = %endpoint,
+        msg_id = %message.msg_id,
+        conversation_id = %message.conversation_id,
+        emotion = %emotion_name,
+        "Emotion API call"
+    );
+
+    let url = format!("https://api.dingtalk.com/v1.0/robot/emotion/{endpoint}");
+
+    let payload = json!({
+        "robotCode": robot_code,
+        "openMsgId": message.msg_id,
+        "openConversationId": message.conversation_id,
+        "emotionType": 2,
+        "emotionName": emotion_name,
+        "textEmotion": {
+            "emotionId": "2659900",
+            "emotionName": emotion_name,
+            "text": emotion_name,
+            "backgroundId": "im_bg_7",
+        },
+    });
+
+    let resp = client
+        .post(&url)
+        .header("x-acs-dingtalk-access-token", token)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) => {
+            if r.status().is_success() {
+                let body = r.text().await.unwrap_or_default();
+                info!(emotion = %emotion_name, endpoint = %endpoint, body = %body, "Emotion {endpoint} succeeded");
+                true
+            } else {
+                let body = r.text().await.unwrap_or_default();
+                warn!(emotion = %emotion_name, endpoint = %endpoint, body = %body, "Emotion {endpoint} failed");
+                false
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, endpoint = %endpoint, "Emotion API request failed");
+            false
+        }
+    }
+}
+
 /// 通过钉钉主动消息 API 发送文件。
 pub async fn reply_file(
     client: &Client,

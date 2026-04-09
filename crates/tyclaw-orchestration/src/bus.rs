@@ -34,6 +34,8 @@ pub struct InboundMessage {
     pub reply_tx: Option<oneshot::Sender<Result<AgentResponse, TyclawError>>>,
     /// 是否为 Timer 触发的消息（Bus 据此设置 TIMER_IN_CONTEXT task_local）。
     pub is_timer: bool,
+    /// 钉钉 emotion 上下文：(msg_id, conversation_id)，用于心跳 emotion 贴/撤。
+    pub emotion_context: Option<(String, String)>,
 }
 
 /// 出站事件 —— 通过 outbound mpsc 路由到 Dispatcher。
@@ -43,6 +45,8 @@ pub enum OutboundEvent {
         channel: String,
         chat_id: String,
         message: String,
+        /// 钉钉 emotion 上下文：(msg_id, conversation_id)，有值时心跳用 emotion API
+        emotion_context: Option<(String, String)>,
     },
     Thinking {
         channel: String,
@@ -118,7 +122,7 @@ impl MessageBus {
         let channel = msg.channel.clone();
         let chat_id = msg.chat_id.clone();
 
-        let progress_cb = Self::make_progress_callback(outbound_tx.clone(), &channel, &chat_id);
+        let progress_cb = Self::make_progress_callback(outbound_tx.clone(), &channel, &chat_id, msg.emotion_context.clone());
 
         let req = {
             let mut r = RequestContext::new(&msg.user_id, &msg.workspace_id, &msg.channel, &msg.chat_id)
@@ -143,11 +147,13 @@ impl MessageBus {
         let heartbeat_outbound = outbound_tx.clone();
         let heartbeat_channel = channel.clone();
         let heartbeat_chat_id = chat_id.clone();
+        let heartbeat_emotion = msg.emotion_context.clone();
         let heartbeat_sender: HeartbeatSender = Arc::new(move |msg: String| {
             let _ = heartbeat_outbound.try_send(OutboundEvent::Progress {
                 channel: heartbeat_channel.clone(),
                 chat_id: heartbeat_chat_id.clone(),
                 message: msg,
+                emotion_context: heartbeat_emotion.clone(),
             });
         });
 
@@ -191,6 +197,7 @@ impl MessageBus {
         outbound_tx: mpsc::Sender<OutboundEvent>,
         channel: &str,
         chat_id: &str,
+        emotion_context: Option<(String, String)>,
     ) -> OnProgress {
         let ch = channel.to_string();
         let cid = chat_id.to_string();
@@ -199,6 +206,7 @@ impl MessageBus {
             let ch = ch.clone();
             let cid = cid.clone();
             let text = text.to_string();
+            let emo = emotion_context.clone();
             Box::pin(async move {
                 let event = if text.starts_with("[Thinking]") {
                     let stripped = text
@@ -215,6 +223,7 @@ impl MessageBus {
                         channel: ch,
                         chat_id: cid,
                         message: text,
+                        emotion_context: emo,
                     }
                 };
                 let _ = tx.send(event).await;

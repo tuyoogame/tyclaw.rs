@@ -70,8 +70,8 @@ impl CliChannel {
                         println!("^C");
                         continue;
                     }
-                    Err(_) => {
-                        println!("Goodbye!");
+                    Err(e) => {
+                        println!("Goodbye! (reason: {e})");
                         let _ = input_tx.blocking_send("__exit__".into());
                         break;
                     }
@@ -97,6 +97,7 @@ impl CliChannel {
                 files: vec![],
                 reply_tx: None,
                 is_timer: false,
+                emotion_context: None,
             };
 
             if let Err(e) = bus_handle.send(msg).await {

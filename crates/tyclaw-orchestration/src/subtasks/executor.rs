@@ -154,8 +154,8 @@ impl NodeExecutor {
             node.id
         ));
 
-        // 构建初始消息（workspace context 直接内联，不再通过 main_llm.md 中转）
-        let messages = build_messages(node, upstream_outputs, &self.app.workspace, dispatch_dir, &ctx_content);
+        // 构建初始消息
+        let messages = build_messages(node, upstream_outputs, &self.app.workspace, dispatch_dir);
         Self::log(&format!(
             "[sub-agent:{}] messages={} msgs, starting agent.run()",
             node.id,
@@ -243,7 +243,7 @@ impl NodeExecutor {
                 ExecutionRecord {
                     node_id: node.id.clone(),
                     model,
-                    input_tokens: 0,
+                    input_tokens: 0, // AgentLoop 内部消耗，暂无法精确统计
                     output_tokens: 0,
                     duration_ms,
                     status: NodeStatus::Success,
@@ -643,22 +643,32 @@ fn build_messages(
     upstream_outputs: &[(String, String)],
     workspace: &std::path::Path,
     dispatch_dir: &std::path::Path,
-    workspace_context: &str,
 ) -> Vec<HashMap<String, Value>> {
     // 统一路径变量：有 sandbox → 容器路径，无 → host 绝对路径
-    let display_ws = if let Some(sandbox) = tyclaw_sandbox::current_sandbox() {
-        sandbox.workspace_root().to_string()
+    let (display_ws, display_ctx) = if let Some(sandbox) = tyclaw_sandbox::current_sandbox() {
+        let ws = sandbox.workspace_root().to_string();
+        let dispatch_rel = dispatch_container_rel(dispatch_dir);
+        let ctx = format!("{}/{}/{}", ws, dispatch_rel, WORKSPACE_CONTEXT_FILENAME);
+        (ws, ctx)
     } else {
-        workspace
+        let abs = workspace
             .canonicalize()
-            .unwrap_or_else(|_| workspace.to_path_buf())
-            .display()
-            .to_string()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        let abs_dispatch = dispatch_dir
+            .canonicalize()
+            .unwrap_or_else(|_| dispatch_dir.to_path_buf());
+        (
+            abs.display().to_string(),
+            abs_dispatch
+                .join(WORKSPACE_CONTEXT_FILENAME)
+                .display()
+                .to_string(),
+        )
     };
 
     let ws_hint = super::prompt_loader::workspace_hint()
         .replace("{workspace}", &display_ws)
-        .replace("{context_file}", "(see below)");
+        .replace("{context_file}", &display_ctx);
 
     // user prompt：上游 context + 任务指令 + 验收标准
     let mut parts = Vec::new();
@@ -708,16 +718,10 @@ fn build_messages(
             system_prompt_for_node_type(&node.node_type),
             "[[CACHE_BOUNDARY]]".to_string(),
         ],
-        user_context: vec![
-            PromptContextEntry {
-                label: "Workspace Hint".to_string(),
-                content: ws_hint,
-            },
-            PromptContextEntry {
-                label: "Main LLM Context".to_string(),
-                content: workspace_context.to_string(),
-            },
-        ],
+        user_context: vec![PromptContextEntry {
+            label: "Workspace Hint".to_string(),
+            content: ws_hint,
+        }],
         system_context: Vec::new(),
     };
 

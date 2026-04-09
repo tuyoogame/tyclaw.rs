@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+// dispatch_subtasks 不需要全局锁——不同 workspace 的 dispatch 可以并发执行
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,6 @@ struct DispatchStructuredSummary {
     has_conflicts: bool,
     wall_time_ms: u64,
     nodes: Vec<DispatchNodeSummary>,
-    /// 所有子 agent 使用的 skill 汇总（用于 audit 统计）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skills_used: Vec<serde_json::Value>,
 }
@@ -64,8 +63,6 @@ pub struct DispatchSubtasksTool {
     description: String,
     /// 不可变的应用级上下文。
     app: Arc<AppContext>,
-    /// 运行锁：防止并发 dispatch（同一时刻只允许一个 dispatch 在执行）。
-    running: AtomicBool,
 }
 
 use super::routing::RoutingPolicy;
@@ -90,7 +87,6 @@ impl DispatchSubtasksTool {
             reducer: Arc::new(reducer),
             description,
             app,
-            running: AtomicBool::new(false),
         }
     }
 
@@ -247,19 +243,6 @@ impl Tool for DispatchSubtasksTool {
     }
 
     async fn execute(&self, params: HashMap<String, Value>) -> String {
-        // 并发锁：同一时刻只允许一个 dispatch 执行，防止 LLM 并发调用浪费资源
-        if self.running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            warn!("dispatch_subtasks: rejected concurrent call (another dispatch is already running)");
-            return "Error: Another dispatch_subtasks is already running. Wait for it to complete before dispatching again.".into();
-        }
-        struct RunningGuard<'a>(&'a AtomicBool);
-        impl Drop for RunningGuard<'_> {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::SeqCst);
-            }
-        }
-        let _guard = RunningGuard(&self.running);
-
         // 解析子任务列表
         let subtasks_val = match params.get("subtasks") {
             Some(v) => v.clone(),
@@ -604,21 +587,18 @@ impl Tool for DispatchSubtasksTool {
             let display_path = write_dispatch_file(&detail_file, &detail_content, &dispatch_dir);
             structured_nodes.push(build_dispatch_node_summary(rec, display_path.clone()));
 
-            // 内联子任务输出（≤2000 chars 直接展示，超出截断并提供 detail 文件路径）
-            const INLINE_MAX_CHARS: usize = 2000;
-            if output.len() <= INLINE_MAX_CHARS {
-                result.push_str(&format!(
-                    "{} **{}** ({:.0}s, {} tools):\n{}\n\n",
-                    status_icon, rec.node_id, duration_s, tools_count, output,
-                ));
+            // 输出的前 200 chars 作为预览
+            let preview = if output.len() > 200 {
+                let boundary = output.floor_char_boundary(200);
+                format!("{}...", &output[..boundary])
             } else {
-                let boundary = output.floor_char_boundary(INLINE_MAX_CHARS);
-                result.push_str(&format!(
-                    "{} **{}** ({:.0}s, {} tools):\n{}...\n   (full output: `{}`)\n\n",
-                    status_icon, rec.node_id, duration_s, tools_count,
-                    &output[..boundary], display_path,
-                ));
-            }
+                output.to_string()
+            };
+
+            result.push_str(&format!(
+                "{} **{}** ({:.0}s, {} tools): {}\n   Detail: `{}`\n\n",
+                status_icon, rec.node_id, duration_s, tools_count, preview, display_path,
+            ));
         }
 
         let hint = super::prompt_loader::dispatch_multi_result_hint();
@@ -628,7 +608,6 @@ impl Tool for DispatchSubtasksTool {
             total_duration_ms as f64 / 1000.0,
             hint.trim(),
         ));
-        // 汇总所有子 agent 的 skill 使用记录
         let all_sub_skills: Vec<serde_json::Value> = records
             .iter()
             .flat_map(|r| r.skills_used.iter().cloned())

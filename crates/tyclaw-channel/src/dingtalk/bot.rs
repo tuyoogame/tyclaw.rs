@@ -105,6 +105,7 @@ impl ChatbotHandler for DingTalkBot {
                 files: vec![],
                 reply_tx: None,
                 is_timer: false,
+                emotion_context: None,
             };
             match self.bus_handle.send_and_wait(msg).await {
                 Ok(response) => {
@@ -125,7 +126,9 @@ impl ChatbotHandler for DingTalkBot {
             return (200, "OK".into());
         }
 
-        handler::reply_markdown(&self.http_client, "处理中", "收到，正在处理中...", &message).await;
+        // 轻量回复：发一条文本确认收到
+        handler::reply_text(&self.http_client, "🦀 收到", &message).await;
+        let emotion_attached = false;
 
         let mut image_data_uris = Vec::new();
         if !image_codes.is_empty() {
@@ -206,6 +209,7 @@ impl ChatbotHandler for DingTalkBot {
                 .collect(),
             reply_tx: None,
             is_timer: false,
+            emotion_context: Some((message.msg_id.clone(), message.conversation_id.clone())),
         };
 
         let result = self.bus_handle.send_and_wait(msg).await;
@@ -302,6 +306,17 @@ impl ChatbotHandler for DingTalkBot {
                             }
                         }
                         Err(e) => error!(error = %e, "DingTalk: failed to get token for file send"),
+                    }
+                }
+                // 撤回所有表情气泡（初始 + 心跳）
+                if emotion_attached {
+                    if let Ok(token) = self.token_manager.get_token().await {
+                        handler::emotion_recall(
+                            &self.http_client, &token, &self.robot_code, &message, "🦀收到...",
+                        ).await;
+                        handler::emotion_recall(
+                            &self.http_client, &token, &self.robot_code, &message, "🦀努力中...",
+                        ).await;
                     }
                 }
                 info!(sender = %nick, "DingTalk: request completed");

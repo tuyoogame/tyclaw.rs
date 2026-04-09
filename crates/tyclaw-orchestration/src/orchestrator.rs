@@ -953,6 +953,7 @@ impl Orchestrator {
 
         // 9.05 release sandbox
         if let (Some((sb, ws)), Some(pool)) = (sandbox, &self.sandbox_pool) {
+            info!(sandbox = %sb.id(), "Releasing sandbox");
             if let Some(cb) = on_progress {
                 cb(&format!("[sandbox] 释放容器 {}", sb.id())).await;
             }
@@ -1047,8 +1048,12 @@ impl Orchestrator {
 
         // 13. 写入审计日志
         if self.app.features.enable_audit {
-            // 从 exec 命令中提取实际调用的 skill 记录
-            let skills_used = helpers::extract_skills_used(&result.messages, &workspace_key, user_name);
+            // 只从当前轮次的消息中提取 skill 调用（按 _turn_id 过滤，避免历史消息误报）
+            let turn_messages: Vec<_> = result.messages.iter()
+                .filter(|m| m.get("_turn_id").and_then(|v| v.as_str()) == Some(&result.turn_id))
+                .cloned()
+                .collect();
+            let skills_used = helpers::extract_skills_used(&turn_messages, &workspace_key, user_name);
 
             let session_id = self.persistence.sessions.get_session_id(&workspace_key)
                 .unwrap_or_else(|| "unknown".into());

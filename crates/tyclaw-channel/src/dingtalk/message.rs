@@ -87,7 +87,7 @@ impl CallbackMessage {
 /// 聊天机器人消息 —— 从 CallbackMessage.data 解析的用户消息。
 ///
 /// 钉钉机器人收到的消息结构，包含发送者信息、会话信息、消息内容等。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatbotMessage {
     /// 消息 ID
@@ -158,6 +158,15 @@ pub struct TextContent {
 impl ChatbotMessage {
     /// 钉钉机器人消息的订阅主题。
     pub const TOPIC: &'static str = "/v1.0/im/bot/messages/get";
+
+    /// 构造一个只包含 msg_id 和 conversation_id 的最小实例（用于 emotion API 调用）。
+    pub fn with_ids(msg_id: &str, conversation_id: &str) -> Self {
+        Self {
+            msg_id: msg_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            ..Default::default()
+        }
+    }
 
     /// 从 JSON Value 反序列化。
     pub fn from_value(data: &Value) -> Result<Self, serde_json::Error> {

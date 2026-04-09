@@ -175,14 +175,13 @@ pub(crate) fn compute_context_budget_plan(query: &str) -> ContextBudgetPlan {
     plan
 }
 
-/// 从 agent loop 的 messages 中提取实际被调用的 skill 记录。
+/// 从 agent loop 的 messages 中提取实际被调用/创建的 skill 记录。
 ///
-/// 检测三种来源：
-/// - **工具型 skill**：exec 调用 `tool.py`/`tool.sh`
-/// - **提示型 skill**：read_file 读取 `SKILL.md`
+/// 检测四种来源：
+/// - **工具型 skill**：exec 调用 `tool.py`/`tool.sh` → type="tool"
+/// - **提示型 skill**：read_file 读取 `SKILL.md` → type="prompt"
+/// - **创建 skill**：write_file 写入 `SKILL.md` 或 `tool.py` → type="created"
 /// - **子 agent skill**：dispatch_subtasks 返回的结构化摘要中包含的 skills_used
-///
-/// 只记录有明确调用/读取证据的 skill，不含仅注入 prompt 摘要但未实际使用的。
 pub fn extract_skills_used(
     messages: &[HashMap<String, Value>],
     workspace_key: &str,
@@ -212,11 +211,24 @@ pub fn extract_skills_used(
                     let extracted = match tool_name {
                         "exec" => extract_skill_from_exec(args_str),
                         "read_file" => extract_skill_from_read(args_str),
+                        "write_file" => extract_skill_from_write(args_str),
                         _ => None,
                     };
 
                     if let Some((skill_name, invoke_type)) = extracted {
-                        if seen.insert(skill_name.clone()) {
+                        // "created" 优先级高于 "tool"/"prompt"（同一 skill 先创建再调用时标记为 created）
+                        let _key = format!("{}:{}", skill_name, invoke_type);
+                        if invoke_type == "created" {
+                            // 移除之前可能记录的 tool/prompt 类型，替换为 created
+                            seen.insert(skill_name.clone());
+                            skills.retain(|s: &Value| s.get("skill").and_then(|v| v.as_str()) != Some(skill_name.as_str()));
+                            skills.push(serde_json::json!({
+                                "skill": skill_name,
+                                "type": invoke_type,
+                                "workspace_key": workspace_key,
+                                "user_name": user_name,
+                            }));
+                        } else if seen.insert(skill_name.clone()) {
                             skills.push(serde_json::json!({
                                 "skill": skill_name,
                                 "type": invoke_type,
@@ -234,7 +246,7 @@ pub fn extract_skills_used(
             if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
                 if let Some(start) = content.find("[[TYCLAW_DISPATCH_SUMMARY]]") {
                     if let Some(end) = content.find("[[/TYCLAW_DISPATCH_SUMMARY]]") {
-                        let json_str = &content[start + "[[TYCLAW_DISPATCH_SUMMARY]]".len()..end].trim();
+                        let json_str = content[start + "[[TYCLAW_DISPATCH_SUMMARY]]".len()..end].trim();
                         if let Ok(summary) = serde_json::from_str::<Value>(json_str) {
                             if let Some(sub_skills) = summary.get("skills_used").and_then(|v| v.as_array()) {
                                 for s in sub_skills {
@@ -277,6 +289,19 @@ fn extract_skill_from_read(args_json: &str) -> Option<(String, &'static str)> {
     if path.ends_with("/SKILL.md") {
         if let Some(name) = parent_dir_name(path) {
             return Some((name, "prompt"));
+        }
+    }
+    None
+}
+
+/// 从 write_file 参数中提取 skill 创建（写入 SKILL.md 或 tool.py/tool.sh）。
+fn extract_skill_from_write(args_json: &str) -> Option<(String, &'static str)> {
+    let args: HashMap<String, Value> = serde_json::from_str(args_json).ok()?;
+    let path = args.get("path").and_then(|v| v.as_str())?;
+
+    if path.ends_with("/SKILL.md") || path.ends_with("/tool.py") || path.ends_with("/tool.sh") {
+        if let Some(name) = parent_dir_name(path) {
+            return Some((name, "created"));
         }
     }
     None

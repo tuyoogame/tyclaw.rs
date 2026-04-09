@@ -549,26 +549,45 @@ async fn run_outbound_dispatcher(
                     OutboundEvent::Error { message, .. } => {
                         eprintln!("\n\x1b[31m[DT:{chat_id}] Error: {message}\x1b[0m\n");
                     }
-                    OutboundEvent::Progress { message, .. } => {
-                        // 心跳消息发送到钉钉
-                        if let Some(text) = message.strip_prefix("[heartbeat]") {
-                            let (conversation_id, user_id) = if chat_id.contains(':') {
-                                let parts: Vec<&str> = chat_id.splitn(2, ':').collect();
-                                (parts[0], parts[1])
+                    OutboundEvent::Progress { message, emotion_context, .. } => {
+                        // 心跳消息：优先用 emotion API 贴/撤表情，无 emotion_context 时回退到文本
+                        // 心跳消息：[heartbeat:reply] 贴表情，[heartbeat:recall] 撤表情
+                        let heartbeat_action = if let Some(text) = message.strip_prefix("[heartbeat:reply]") {
+                            Some(("reply", text))
+                        } else if let Some(text) = message.strip_prefix("[heartbeat:recall]") {
+                            Some(("recall", text))
+                        } else if let Some(text) = message.strip_prefix("[heartbeat]") {
+                            Some(("reply", text)) // 兼容旧格式
+                        } else {
+                            None
+                        };
+                        if let Some((action, text)) = heartbeat_action {
+                            if let Some((ref msg_id, ref conv_id)) = emotion_context {
+                                if let Ok(token) = sender.token_manager.get_token().await {
+                                    use tyclaw_channel::dingtalk::message::ChatbotMessage;
+                                    let fake_msg = ChatbotMessage::with_ids(msg_id, conv_id);
+                                    if action == "reply" {
+                                        handler::emotion_reply(&sender.http_client, &token, &sender.robot_code, &fake_msg, text).await;
+                                    } else {
+                                        handler::emotion_recall(&sender.http_client, &token, &sender.robot_code, &fake_msg, text).await;
+                                    }
+                                }
                             } else {
-                                ("", chat_id.as_str())
-                            };
-                            if let Ok(token) = sender.token_manager.get_token().await {
-                                handler::send_text_by_channel(
-                                    &sender.http_client,
-                                    &token,
-                                    &sender.robot_code,
-                                    &channel,
-                                    user_id,
-                                    conversation_id,
-                                    text,
-                                )
-                                .await;
+                                // CLI 回退：只在 reply 时发文本
+                                if action == "reply" {
+                                    let (conversation_id, user_id) = if chat_id.contains(':') {
+                                        let parts: Vec<&str> = chat_id.splitn(2, ':').collect();
+                                        (parts[0], parts[1])
+                                    } else {
+                                        ("", chat_id.as_str())
+                                    };
+                                    if let Ok(token) = sender.token_manager.get_token().await {
+                                        handler::send_text_by_channel(
+                                            &sender.http_client, &token, &sender.robot_code,
+                                            &channel, user_id, conversation_id, text,
+                                        ).await;
+                                    }
+                                }
                             }
                         }
                         if message.contains("[sandbox]") || message.contains("[已创建任务") {
@@ -654,6 +673,7 @@ fn spawn_timer_consumer(
                 content: format!("[Scheduled Task: {}] {}", job.name, job.payload.message),
                 user_id: job.payload.user_id.clone(),
                 user_name: "timer".into(),
+                emotion_context: None,
                 workspace_id: job.payload.workspace_id.unwrap_or_else(|| "default".into()),
                 channel: job.payload.channel.unwrap_or_else(|| "cli".into()),
                 chat_id: job.payload.chat_id.unwrap_or_else(|| "direct".into()),

@@ -69,62 +69,79 @@ fn scan_skill_dir(skill_dir: &Path) -> Option<SkillMeta> {
         Err(_) => return None,
     };
 
-    let meta = parse_skill_frontmatter(&content)?;
-    let mapping = meta.as_mapping()?;
-
-    let name = mapping
-        .get(&serde_yaml::Value::String("name".into()))?
-        .as_str()?
+    let dir_name = skill_dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
         .to_string();
 
-    let get_str = |key: &str| -> String {
-        mapping
-            .get(&serde_yaml::Value::String(key.into()))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-
-    let get_str_vec = |key: &str| -> Vec<String> {
-        mapping
-            .get(&serde_yaml::Value::String(key.into()))
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
+    // 尝试解析 frontmatter；没有则用目录名和首行作为 fallback
+    let (name, description, category, tags, triggers, tool, risk_level, requires_capabilities) =
+        if let Some(meta) = parse_skill_frontmatter(&content) {
+            if let Some(mapping) = meta.as_mapping() {
+                let get_str = |key: &str| -> String {
+                    mapping
+                        .get(&serde_yaml::Value::String(key.into()))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let get_str_vec = |key: &str| -> Vec<String> {
+                    mapping
+                        .get(&serde_yaml::Value::String(key.into()))
+                        .and_then(|v| v.as_sequence())
+                        .map(|seq| {
+                            seq.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let name = mapping
+                    .get(&serde_yaml::Value::String("name".into()))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&dir_name)
+                    .to_string();
+                let tool_str = get_str("tool");
+                let risk = get_str("risk_level");
+                (
+                    name,
+                    get_str("description"),
+                    get_str("category"),
+                    get_str_vec("tags"),
+                    get_str_vec("triggers"),
+                    if tool_str.is_empty() { None } else { Some(tool_str) },
+                    if risk.is_empty() { "read".into() } else { risk },
+                    get_str_vec("requires_capabilities"),
+                )
+            } else {
+                // frontmatter 解析成功但不是 mapping，用 fallback
+                let first_line = content.lines().next().unwrap_or("").trim_start_matches('#').trim();
+                (dir_name.clone(), first_line.to_string(), String::new(), vec![], vec![], None, "read".into(), vec![])
+            }
+        } else {
+            // 无 frontmatter，用目录名和首行 fallback（兼容子 agent 创建的无 frontmatter SKILL.md）
+            let first_line = content.lines().next().unwrap_or("").trim_start_matches('#').trim();
+            let tool_file = if skill_dir.join("tool.py").exists() {
+                Some("tool.py".to_string())
+            } else if skill_dir.join("tool.sh").exists() {
+                Some("tool.sh".to_string())
+            } else {
+                None
+            };
+            (dir_name.clone(), first_line.to_string(), String::new(), vec![], vec![], tool_file, "read".into(), vec![])
+        };
 
     Some(SkillMeta {
-        key: skill_dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string(),
+        key: dir_name,
         name,
-        description: get_str("description"),
-        category: get_str("category"),
-        tags: get_str_vec("tags"),
-        triggers: get_str_vec("triggers"),
-        tool: {
-            let t = get_str("tool");
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
-            }
-        },
-        risk_level: {
-            let r = get_str("risk_level");
-            if r.is_empty() {
-                "read".into()
-            } else {
-                r
-            }
-        },
-        requires_capabilities: get_str_vec("requires_capabilities"),
+        description,
+        category,
+        tags,
+        triggers,
+        tool,
+        risk_level,
+        requires_capabilities,
         skill_dir: skill_dir.to_path_buf(),
         content,
         status: String::new(),
