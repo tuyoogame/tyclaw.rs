@@ -1351,19 +1351,20 @@ fn ensure_tool_call_pairs(messages: Vec<Value>) -> Vec<Value> {
         // 对 assistant 消息，去掉重复 id 的 tool_calls（只保留第一次出现的）
         if role == "assistant" && !duplicate_call_ids.is_empty() {
             if let Some(Value::Array(tcs)) = msg.get("tool_calls") {
-                let has_dup = tcs.iter().any(|tc| {
-                    tc.get("id").and_then(|v| v.as_str())
-                        .map_or(false, |id| duplicate_call_ids.contains(id) && emitted_call_ids.contains(id))
-                });
-                if has_dup {
-                    // 从 tool_calls 中移除已出现过的重复 id
-                    let filtered_tcs: Vec<Value> = tcs.iter()
-                        .filter(|tc| {
-                            let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                            !duplicate_call_ids.contains(id) || emitted_call_ids.insert(id.to_string())
-                        })
-                        .cloned()
-                        .collect();
+                // 过滤：对重复 id 只保留首次出现（通过 emitted_call_ids 追踪）
+                let filtered_tcs: Vec<Value> = tcs.iter()
+                    .filter(|tc| {
+                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        if duplicate_call_ids.contains(id) {
+                            emitted_call_ids.insert(id.to_string()) // 首次 insert 返回 true=保留
+                        } else {
+                            true // 非重复 id 总是保留
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                let has_removed = filtered_tcs.len() < tcs.len();
+                if has_removed {
                     if filtered_tcs.is_empty() {
                         // 所有 tool_calls 都是重复的，跳过整个 assistant 消息
                         continue;

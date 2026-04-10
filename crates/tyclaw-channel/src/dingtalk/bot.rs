@@ -126,9 +126,14 @@ impl ChatbotHandler for DingTalkBot {
             return (200, "OK".into());
         }
 
-        // 轻量回复：发一条文本确认收到
-        handler::reply_text(&self.http_client, "🦀 收到", &message).await;
-        let emotion_attached = false;
+        // 在用户原始消息上贴表情气泡（emotion API）
+        let emotion_attached = if let Ok(token) = self.token_manager.get_token().await {
+            handler::emotion_reply(
+                &self.http_client, &token, &self.robot_code, &message, "🦀收到...",
+            ).await
+        } else {
+            false
+        };
 
         let mut image_data_uris = Vec::new();
         if !image_codes.is_empty() {
@@ -316,6 +321,9 @@ impl ChatbotHandler for DingTalkBot {
                         ).await;
                         handler::emotion_recall(
                             &self.http_client, &token, &self.robot_code, &message, "🦀努力中...",
+                        ).await;
+                        handler::emotion_recall(
+                            &self.http_client, &token, &self.robot_code, &message, "🦀加油干...",
                         ).await;
                     }
                 }

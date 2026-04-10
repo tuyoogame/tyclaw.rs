@@ -233,14 +233,15 @@ impl AgentRuntime for AgentLoop {
 
             // CLI 进度：打印当前轮次
             if let Some(cb) = on_progress {
-                if total_iterations % 3 == 0 {
-                    // 交替贴/撤：第3轮贴，第6轮撤，第9轮贴...
-                    let cycle = total_iterations / 3;
-                    if cycle % 2 == 1 {
-                        cb("[heartbeat:reply]🦀努力中...").await;
-                    } else {
-                        cb("[heartbeat:recall]🦀努力中...").await;
-                    }
+                if total_iterations == 1 {
+                    // 第1轮：撤收到 → 贴努力中
+                    cb("[heartbeat:switch]🦀收到...|🦀努力中...").await;
+                } else if total_iterations % 2 == 0 {
+                    // 偶数轮：撤努力中 → 贴加油干
+                    cb("[heartbeat:switch]🦀努力中...|🦀加油干...").await;
+                } else {
+                    // 奇数轮：撤加油干 → 贴努力中
+                    cb("[heartbeat:switch]🦀加油干...|🦀努力中...").await;
                 }
                 cb(&format!(
                     "[轮次 {total_iterations}] 阶段={phase} 第{phase_iter}轮"

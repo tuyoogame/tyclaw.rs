@@ -550,44 +550,30 @@ async fn run_outbound_dispatcher(
                         eprintln!("\n\x1b[31m[DT:{chat_id}] Error: {message}\x1b[0m\n");
                     }
                     OutboundEvent::Progress { message, emotion_context, .. } => {
-                        // 心跳消息：优先用 emotion API 贴/撤表情，无 emotion_context 时回退到文本
-                        // 心跳消息：[heartbeat:reply] 贴表情，[heartbeat:recall] 撤表情
-                        let heartbeat_action = if let Some(text) = message.strip_prefix("[heartbeat:reply]") {
-                            Some(("reply", text))
-                        } else if let Some(text) = message.strip_prefix("[heartbeat:recall]") {
-                            Some(("recall", text))
-                        } else if let Some(text) = message.strip_prefix("[heartbeat]") {
-                            Some(("reply", text)) // 兼容旧格式
-                        } else {
-                            None
-                        };
-                        if let Some((action, text)) = heartbeat_action {
+                        // 心跳 emotion：[heartbeat:switch]旧标签|新标签 — 撤旧贴新
+                        if let Some(pair) = message.strip_prefix("[heartbeat:switch]") {
                             if let Some((ref msg_id, ref conv_id)) = emotion_context {
-                                if let Ok(token) = sender.token_manager.get_token().await {
-                                    use tyclaw_channel::dingtalk::message::ChatbotMessage;
-                                    let fake_msg = ChatbotMessage::with_ids(msg_id, conv_id);
-                                    if action == "reply" {
-                                        handler::emotion_reply(&sender.http_client, &token, &sender.robot_code, &fake_msg, text).await;
-                                    } else {
-                                        handler::emotion_recall(&sender.http_client, &token, &sender.robot_code, &fake_msg, text).await;
-                                    }
-                                }
-                            } else {
-                                // CLI 回退：只在 reply 时发文本
-                                if action == "reply" {
-                                    let (conversation_id, user_id) = if chat_id.contains(':') {
-                                        let parts: Vec<&str> = chat_id.splitn(2, ':').collect();
-                                        (parts[0], parts[1])
-                                    } else {
-                                        ("", chat_id.as_str())
-                                    };
+                                if let Some((old, new)) = pair.split_once('|') {
                                     if let Ok(token) = sender.token_manager.get_token().await {
-                                        handler::send_text_by_channel(
-                                            &sender.http_client, &token, &sender.robot_code,
-                                            &channel, user_id, conversation_id, text,
-                                        ).await;
+                                        use tyclaw_channel::dingtalk::message::ChatbotMessage;
+                                        let fake_msg = ChatbotMessage::with_ids(msg_id, conv_id);
+                                        handler::emotion_recall(&sender.http_client, &token, &sender.robot_code, &fake_msg, old).await;
+                                        handler::emotion_reply(&sender.http_client, &token, &sender.robot_code, &fake_msg, new).await;
                                     }
                                 }
+                            }
+                        } else if let Some(text) = message.strip_prefix("[heartbeat]") {
+                            let (conversation_id, user_id) = if chat_id.contains(':') {
+                                let parts: Vec<&str> = chat_id.splitn(2, ':').collect();
+                                (parts[0], parts[1])
+                            } else {
+                                ("", chat_id.as_str())
+                            };
+                            if let Ok(token) = sender.token_manager.get_token().await {
+                                handler::send_text_by_channel(
+                                    &sender.http_client, &token, &sender.robot_code,
+                                    &channel, user_id, conversation_id, text,
+                                ).await;
                             }
                         }
                         if message.contains("[sandbox]") || message.contains("[已创建任务") {
