@@ -255,6 +255,9 @@ async fn main() {
 
     info!(?config_path, "Loaded config (or defaults)");
 
+    // 初始化 LLM 并发限制
+    tyclaw_provider::init_concurrency(cfg.llm.max_concurrent_llm);
+
     // 配置优先级：命令行参数 > 环境变量 > providers[name] > llm 内联字段 > 默认值
     //
     // 新格式（推荐）：llm.provider 引用全局 providers 中的名字

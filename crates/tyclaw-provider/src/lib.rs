@@ -18,6 +18,6 @@ pub mod reasoning;
 
 // 重新导出核心类型
 pub use openai_compat::OpenAICompatProvider;
-pub use provider::LLMProvider;
+pub use provider::{LLMProvider, init_concurrency};
 pub use reasoning::{parse_reasoning, ParsedReasoning, ReasoningBlock};
 pub use types::{ChatRequest, GenerationSettings, LLMResponse, ThinkingConfig, ToolCallRequest};

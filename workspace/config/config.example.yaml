@@ -109,6 +109,7 @@ llm:
   max_iterations: 99                      # Agent 最大迭代次数
   context_window_tokens: 200000           # 上下文窗口（token），按模型能力配置
   snapshot: false                          # 是否保存对话快照
+  max_concurrent_llm: 4                    # LLM 并发调用上限（多个 agent loop 共享，0=使用默认值4）
 
   # 也支持内联配置（兼容旧格式，不设 provider 时生效）：
   # api_key: "sk-your-key"

@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use tracing::warn;
+use std::sync::OnceLock;
+use tokio::sync::Semaphore;
+use tracing::{info, warn};
 
 use tyclaw_types::TyclawError;
 
@@ -8,6 +10,23 @@ use crate::types::{ChatRequest, GenerationSettings, LLMResponse};
 /// 重试延迟时间序列（单位：秒）。
 /// 采用指数退避策略：1s → 2s → 4s，共 3 次重试后执行最终尝试。
 const RETRY_DELAYS: &[u64] = &[1, 2, 4];
+
+/// 默认 LLM 并发上限。
+const DEFAULT_MAX_CONCURRENT_LLM: usize = 4;
+
+/// 全局 LLM 并发信号量。
+static LLM_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+
+/// 初始化 LLM 并发限制。应在启动时调用一次。
+pub fn init_concurrency(max_concurrent: usize) {
+    let limit = if max_concurrent == 0 { DEFAULT_MAX_CONCURRENT_LLM } else { max_concurrent };
+    let _ = LLM_SEMAPHORE.set(Semaphore::new(limit));
+    info!(max_concurrent = limit, "LLM concurrency limit initialized");
+}
+
+fn get_semaphore() -> &'static Semaphore {
+    LLM_SEMAPHORE.get_or_init(|| Semaphore::new(DEFAULT_MAX_CONCURRENT_LLM))
+}
 
 /// 临时性错误的特征字符串列表。
 /// 当 LLM 返回的错误信息中包含这些关键词时，认为是可重试的临时错误。
@@ -101,6 +120,9 @@ pub trait LLMProvider: Send + Sync {
             max_tokens: settings.max_tokens,
             temperature: settings.temperature,
         };
+
+        // 获取 LLM 并发信号量（多个 agent loop 共享，限制同时调用 LLM 的数量）
+        let _permit = get_semaphore().acquire().await.expect("LLM semaphore closed");
 
         // 按延迟序列依次重试
         for (attempt, delay) in RETRY_DELAYS.iter().enumerate() {

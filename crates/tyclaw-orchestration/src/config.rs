@@ -85,6 +85,9 @@ pub struct LlmConfig {
     pub thinking_effort: String,
     #[serde(default)]
     pub thinking_budget_tokens: Option<u32>,
+    /// LLM 并发调用上限（多个 agent loop 共享，默认 4，0=使用默认值）
+    #[serde(default)]
+    pub max_concurrent_llm: usize,
 }
 
 /// 日志配置。
