@@ -66,17 +66,17 @@ risk_level: write
 
 ### Step 2.5: 检查是否已存在
 
-用 `read_file` 尝试读取 `skills/{skill_name}/SKILL.md`：
+用 `read_file` 尝试读取 `_personal/skills/{skill_name}/SKILL.md`：
 - **文件存在** → 已有 Skill，切换到修改流程（第二节），不要重新创建。
 - **文件不存在** → 继续创建流程。
 
 ### Step 3: 生成两件套
 
-**V2 路径变更**：`skills/{skill_name}/`
+**V2 路径变更**：`_personal/skills/{skill_name}/`
 
 #### 3a. 工具脚本
 
-路径：`skills/{skill_name}/tool.py`
+路径：`_personal/skills/{skill_name}/tool.py`
 
 要求：
 - 使用 argparse 解析命令行参数
@@ -91,7 +91,7 @@ risk_level: write
 
 #### 3b. Skill 文档
 
-路径：`skills/{skill_name}/SKILL.md`
+路径：`_personal/skills/{skill_name}/SKILL.md`
 
 格式（必须包含 YAML frontmatter）：
 ```markdown
@@ -127,7 +127,7 @@ tool: tool.py
 ## 二、修改流程
 
 ### Step 1: 定位 Skill
-- 根据用户描述匹配 `skills/` 下的 Skill 目录
+- 根据用户描述匹配 `_personal/skills/` 下的 Skill 目录
 - 读取 `SKILL.md` 和 `tool.py`，理解现有逻辑
 
 ### Step 2: 确认修改范围
@@ -145,7 +145,7 @@ tool: tool.py
 ## 三、删除流程
 
 ### Step 1: 确认目标
-- 匹配 `skills/` 下的 Skill
+- 匹配 `_personal/skills/` 下的 Skill
 - 如果目标是 builtin 能力，拒绝删除
 
 ### Step 2: 确认删除
@@ -160,7 +160,7 @@ tool: tool.py
 
 ## 安全约束
 
-1. 只能在 `skills/{skill_name}/` 下创建/修改/删除文件
+1. 只能在 `_personal/skills/{skill_name}/` 下创建/修改/删除文件
 2. 禁止读取或修改其他用户的文件
 3. 禁止修改或删除 builtin 能力
 4. 工具脚本禁止包含到外部未知服务的网络请求（内网 API 除外）

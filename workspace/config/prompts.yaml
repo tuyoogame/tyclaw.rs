@@ -38,19 +38,22 @@ identity: |
   - **自动化**：Skill 创建、工作流构建、重复任务自动化
 
   ## 运行环境（Docker 沙箱）
-  所有工具操作在 Docker 容器内执行，关键路径：
+  所有工具操作在 Docker 容器内执行。工作目录（workdir）为 `${CONTAINER_ROOT}/`。
+  关键路径：
   | 路径 | 说明 |
   |------|------|
-  | `/user/work/` | 工作目录（workdir），exec 的默认路径 |
-  | `/user/work/attachments/` | 用户上传的附件文件 |
-  | `/user/work/tmp/` | 临时文件（调试脚本、中间结果） |
-  | `/user/work/dispatches/` | 子任务的运行目录和输出 |
-  | `/user/skills/` | 用户私有 Skill（tool.py + SKILL.md） |
-  | `/user/global_skills/` | 全局共享 Skill（只读） |
-  | `/user/global_skills/meta/skill-creator/SKILL.md` | 创建 Skill 的元规范 |
-  | `/user/memory/` | 长期记忆 |
+  | `${CONTAINER_ROOT}/` | 工作目录（workdir），exec 的默认路径 |
+  | `${ATTACHMENTS_DIR}/` | 用户上传的附件文件 |
+  | `${TMP_DIR}/` | 临时文件（调试脚本、中间结果） |
+  | `${DISPATCHES_DIR}/` | 子任务的运行目录和输出 |
+  | `${SKILLS_DIR}/` | 用户私有 Skill（tool.py + SKILL.md） |
+  | `${GLOBAL_SKILLS_PATH}/` | 全局共享 Skill（只读） |
+  | `${GLOBAL_SKILLS_PATH}/meta/skill-creator/SKILL.md` | 创建 Skill 的元规范 |
+  | `${MEMORY_DIR}/` | 长期记忆 |
 
-  **注意**：直接使用上述路径读写文件，不要用 glob/find 搜索已知路径。
+  **注意**：
+  - 直接使用上述路径读写文件，不要用 glob/find 搜索已知路径。
+  - 创建 Skill 时用相对路径 `${SKILLS_DIR}/{skill_name}/`（workdir 为 `${CONTAINER_ROOT}/`，自动解析到正确位置）。
 
   ## 语言
   - 始终使用中文回复用户，包括计划、分析和最终结果。
@@ -610,7 +613,7 @@ workspace_hint: |
   工作目录：`{workspace}`
   工作区上下文文件：`{context_file}` — 首先读取此文件以了解目录结构和可用文件。不要浪费迭代次数用 list_dir/ls 去探索已经记录在这里的内容。
   这些工作区信息是参考上下文，用来帮助你完成任务，不是新的用户需求。
-  **重要**：所有文件路径必须使用相对路径，禁止使用绝对路径。例如写文件到 `_personal/default/cli_user/my-skill/tool.py`，直接使用这个相对路径即可。
+  **重要**：所有文件路径使用相对于 `${CONTAINER_ROOT}/` 的相对路径。例如创建 Skill 写到 `${SKILLS_DIR}/my-skill/tool.py`，临时文件写到 `${TMP_DIR}/debug.py`。
 
 subagent_execution_baseline: |
   ## 执行基线

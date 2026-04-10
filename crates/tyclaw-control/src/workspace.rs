@@ -28,6 +28,111 @@ use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 use tracing::debug;
 
+// ─── 路径配置 ────────────────────────────────────────────────────────────────
+
+/// 路径配置 —— 所有路径通过 config.yaml 配置，支持缺省值。
+///
+/// 分两类：
+/// 1. 容器路径（Docker 相关）：container_root, container_workdir, global_skills_mount
+/// 2. Workspace 子目录名（相对 workspace_dir）：skills_dir, memory_dir 等
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathConfig {
+    // === Docker 容器配置 ===
+
+    /// 容器挂载根路径（workspace_dir 整体挂载到此路径）
+    #[serde(default = "d_container_root")]
+    pub container_root: String,
+
+    /// 容器工作目录（docker exec -w）
+    #[serde(default = "d_container_workdir")]
+    pub container_workdir: String,
+
+    /// 全局 skills 在容器内的挂载目录名（相对 container_root）
+    #[serde(default = "d_global_skills_mount")]
+    pub global_skills_mount: String,
+
+    // === Workspace 内目录名（相对 workspace_dir） ===
+
+    /// 用户私有 Skill 目录
+    #[serde(default = "d_skills_dir")]
+    pub skills_dir: String,
+
+    /// 长期记忆目录
+    #[serde(default = "d_memory_dir")]
+    pub memory_dir: String,
+
+    /// 私有案例目录
+    #[serde(default = "d_cases_dir")]
+    pub cases_dir: String,
+
+    /// 附件目录（代码控制，在 work/ 下）
+    #[serde(default = "d_attachments_dir")]
+    pub attachments_dir: String,
+
+    /// 临时文件目录（代码控制，在 work/ 下）
+    #[serde(default = "d_tmp_dir")]
+    pub tmp_dir: String,
+
+    /// 子任务调度目录（代码控制，在 work/ 下）
+    #[serde(default = "d_dispatches_dir")]
+    pub dispatches_dir: String,
+
+    /// 会话历史文件名
+    #[serde(default = "d_history_file")]
+    pub history_file: String,
+
+    /// 定时任务文件名
+    #[serde(default = "d_timer_file")]
+    pub timer_file: String,
+}
+
+impl Default for PathConfig {
+    fn default() -> Self {
+        Self {
+            container_root: d_container_root(),
+            container_workdir: d_container_workdir(),
+            global_skills_mount: d_global_skills_mount(),
+            skills_dir: d_skills_dir(),
+            memory_dir: d_memory_dir(),
+            cases_dir: d_cases_dir(),
+            attachments_dir: d_attachments_dir(),
+            tmp_dir: d_tmp_dir(),
+            dispatches_dir: d_dispatches_dir(),
+            history_file: d_history_file(),
+            timer_file: d_timer_file(),
+        }
+    }
+}
+
+impl PathConfig {
+    /// 生成 prompts.yaml 变量替换表。
+    pub fn to_prompt_vars(&self) -> HashMap<String, String> {
+        let mut vars = HashMap::new();
+        vars.insert("CONTAINER_ROOT".into(), self.container_root.clone());
+        vars.insert("SKILLS_DIR".into(), self.skills_dir.clone());
+        vars.insert("MEMORY_DIR".into(), self.memory_dir.clone());
+        vars.insert("CASES_DIR".into(), self.cases_dir.clone());
+        vars.insert("ATTACHMENTS_DIR".into(), self.attachments_dir.clone());
+        vars.insert("TMP_DIR".into(), self.tmp_dir.clone());
+        vars.insert("DISPATCHES_DIR".into(), self.dispatches_dir.clone());
+        vars.insert("GLOBAL_SKILLS_DIR".into(), self.global_skills_mount.clone());
+        vars.insert("GLOBAL_SKILLS_PATH".into(), format!("{}/{}", self.container_root, self.global_skills_mount));
+        vars
+    }
+}
+
+fn d_container_root() -> String { "/workspace".into() }
+fn d_container_workdir() -> String { "/workspace".into() }
+fn d_global_skills_mount() -> String { "skills".into() }
+fn d_skills_dir() -> String { "_personal/skills".into() }
+fn d_memory_dir() -> String { "memory".into() }
+fn d_cases_dir() -> String { "cases".into() }
+fn d_attachments_dir() -> String { "work/attachments".into() }
+fn d_tmp_dir() -> String { "work/tmp".into() }
+fn d_dispatches_dir() -> String { "work/dispatches".into() }
+fn d_history_file() -> String { "history.jsonl".into() }
+fn d_timer_file() -> String { "timer_jobs.json".into() }
+
 // ─── Workspace Key Strategy ──────────────────────────────────────────────────
 
 /// Workspace key 解析策略。
@@ -153,6 +258,8 @@ pub struct WorkspaceManager {
     key_strategy: WorkspaceKeyStrategy,
     /// workspace 实例缓存（多租户配置）
     workspaces: Mutex<HashMap<String, Workspace>>,
+    /// 路径配置
+    paths: PathConfig,
 }
 
 impl WorkspaceManager {
@@ -160,6 +267,15 @@ impl WorkspaceManager {
         root: impl AsRef<Path>,
         key_strategy: WorkspaceKeyStrategy,
         workspaces_config: Option<HashMap<String, WorkspaceConfig>>,
+    ) -> Self {
+        Self::with_path_config(root, key_strategy, workspaces_config, PathConfig::default())
+    }
+
+    pub fn with_path_config(
+        root: impl AsRef<Path>,
+        key_strategy: WorkspaceKeyStrategy,
+        workspaces_config: Option<HashMap<String, WorkspaceConfig>>,
+        paths: PathConfig,
     ) -> Self {
         let root = root.as_ref().to_path_buf();
         let works_dir = root.join("works");
@@ -170,6 +286,7 @@ impl WorkspaceManager {
             works_dir,
             key_strategy,
             workspaces: Mutex::new(ws_map),
+            paths,
         };
         debug!(
             root = %mgr.root.display(),
@@ -177,6 +294,11 @@ impl WorkspaceManager {
             "WorkspaceManager initialized"
         );
         mgr
+    }
+
+    /// 获取路径配置。
+    pub fn path_config(&self) -> &PathConfig {
+        &self.paths
     }
 
     fn init_from_config(
@@ -308,49 +430,49 @@ impl WorkspaceManager {
         workspace_path_in(&self.works_dir, workspace_key)
     }
 
-    /// workspace 记忆目录：`{root}/works/{bucket}/{key}/memory`
+    /// workspace 记忆目录（可配置，默认 `memory`）
     pub fn memory_dir(&self, workspace_key: &str) -> PathBuf {
-        self.workspace_dir(workspace_key).join("memory")
+        self.workspace_dir(workspace_key).join(&self.paths.memory_dir)
     }
 
-    /// workspace 私有技能目录：`{root}/works/{bucket}/{key}/skills`
+    /// workspace 私有技能目录（可配置，默认 `skills`）
     pub fn workspace_skills_dir(&self, workspace_key: &str) -> PathBuf {
-        self.workspace_dir(workspace_key).join("skills")
+        self.workspace_dir(workspace_key).join(&self.paths.skills_dir)
     }
 
-    /// workspace 私有案例目录：`{root}/works/{bucket}/{key}/cases`
+    /// workspace 私有案例目录（可配置，默认 `cases`）
     pub fn workspace_cases_dir(&self, workspace_key: &str) -> PathBuf {
-        self.workspace_dir(workspace_key).join("cases")
+        self.workspace_dir(workspace_key).join(&self.paths.cases_dir)
     }
 
-    /// workspace 对话历史文件：`{root}/works/{bucket}/{key}/history.jsonl`
+    /// workspace 对话历史文件（可配置，默认 `history.jsonl`）
     pub fn history_path(&self, workspace_key: &str) -> PathBuf {
-        self.workspace_dir(workspace_key).join("history.jsonl")
+        self.workspace_dir(workspace_key).join(&self.paths.history_file)
     }
 
-    /// workspace 定时任务文件：`{root}/works/{bucket}/{key}/timer_jobs.json`
+    /// workspace 定时任务文件（可配置，默认 `timer_jobs.json`）
     pub fn timer_path(&self, workspace_key: &str) -> PathBuf {
-        self.workspace_dir(workspace_key).join("timer_jobs.json")
+        self.workspace_dir(workspace_key).join(&self.paths.timer_file)
     }
 
-    /// workspace 工作目录（docker 挂载点）：`{root}/works/{bucket}/{key}/work`
+    /// workspace 附件目录（可配置，默认 `work/attachments`）
+    pub fn attachments_dir(&self, workspace_key: &str) -> PathBuf {
+        self.workspace_dir(workspace_key).join(&self.paths.attachments_dir)
+    }
+
+    /// workspace tmp 目录（可配置，默认 `work/tmp`）
+    pub fn tmp_dir(&self, workspace_key: &str) -> PathBuf {
+        self.workspace_dir(workspace_key).join(&self.paths.tmp_dir)
+    }
+
+    /// workspace dispatches 目录（可配置，默认 `work/dispatches`）
+    pub fn dispatches_dir(&self, workspace_key: &str) -> PathBuf {
+        self.workspace_dir(workspace_key).join(&self.paths.dispatches_dir)
+    }
+
+    /// workspace work 目录（work/ 子目录的父级）
     pub fn work_dir(&self, workspace_key: &str) -> PathBuf {
         self.workspace_dir(workspace_key).join("work")
-    }
-
-    /// workspace tmp 目录：`{root}/works/{bucket}/{key}/work/tmp`
-    pub fn tmp_dir(&self, workspace_key: &str) -> PathBuf {
-        self.work_dir(workspace_key).join("tmp")
-    }
-
-    /// workspace dispatches 目录：`{root}/works/{bucket}/{key}/work/dispatches`
-    pub fn dispatches_dir(&self, workspace_key: &str) -> PathBuf {
-        self.work_dir(workspace_key).join("dispatches")
-    }
-
-    /// workspace attachments 目录：`{root}/works/{bucket}/{key}/work/attachments`
-    pub fn attachments_dir(&self, workspace_key: &str) -> PathBuf {
-        self.work_dir(workspace_key).join("attachments")
     }
 
     // ── 扫描 ──
@@ -382,12 +504,12 @@ impl WorkspaceManager {
     /// 确保 workspace 目录结构存在。
     pub fn ensure_workspace(&self, workspace_key: &str) {
         let ws_dir = self.workspace_dir(workspace_key);
-        let _ = std::fs::create_dir_all(ws_dir.join("memory"));
-        let _ = std::fs::create_dir_all(ws_dir.join("skills"));
-        let _ = std::fs::create_dir_all(ws_dir.join("cases"));
-        let _ = std::fs::create_dir_all(ws_dir.join("work").join("tmp"));
-        let _ = std::fs::create_dir_all(ws_dir.join("work").join("attachments"));
-        let _ = std::fs::create_dir_all(ws_dir.join("work").join("dispatches"));
+        let _ = std::fs::create_dir_all(ws_dir.join(&self.paths.memory_dir));
+        let _ = std::fs::create_dir_all(ws_dir.join(&self.paths.skills_dir));
+        let _ = std::fs::create_dir_all(ws_dir.join(&self.paths.cases_dir));
+        let _ = std::fs::create_dir_all(ws_dir.join(&self.paths.tmp_dir));
+        let _ = std::fs::create_dir_all(ws_dir.join(&self.paths.attachments_dir));
+        let _ = std::fs::create_dir_all(ws_dir.join(&self.paths.dispatches_dir));
     }
 }
 

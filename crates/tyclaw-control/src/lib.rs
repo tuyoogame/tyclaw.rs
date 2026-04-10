@@ -31,6 +31,6 @@ pub use gate::{ExecutionGate, Judgment, JudgmentAction};
 pub use rate_limiter::RateLimiter;
 pub use rbac::RBACManager;
 pub use workspace::{
-    RequestIdentity, Workspace, WorkspaceConfig, WorkspaceKeyStrategy, WorkspaceManager,
-    workspace_path, workspace_path_in,
+    PathConfig, RequestIdentity, Workspace, WorkspaceConfig, WorkspaceKeyStrategy,
+    WorkspaceManager, workspace_path, workspace_path_in,
 };

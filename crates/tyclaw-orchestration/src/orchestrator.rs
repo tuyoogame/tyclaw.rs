@@ -371,7 +371,7 @@ impl Orchestrator {
                 for (path, name) in &req.file_attachments {
                     let dest = attachments_dir.join(name);
                     let _ = std::fs::create_dir_all(&attachments_dir);
-                    let display_path = format!("attachments/{name}");
+                    let display_path = format!("{}/{name}", self.persistence.workspace_mgr.path_config().attachments_dir);
                     if path != &dest {
                         let _ = std::fs::copy(path, &dest);
                     }
@@ -647,7 +647,7 @@ impl Orchestrator {
                 if let Err(e) = std::fs::create_dir_all(&user_attachments_dir) {
                     warn!(error = %e, "Failed to create attachments dir for file copy");
                 }
-                let display_path = format!("attachments/{name}");
+                let display_path = format!("{}/{name}", self.persistence.workspace_mgr.path_config().attachments_dir);
                 if path == &dest {
                     msg.push_str(&format!("\n- {name} (路径: {display_path})"));
                     info!(path = %dest.display(), "Attachment already staged in user attachments dir");
@@ -695,13 +695,18 @@ impl Orchestrator {
                 category: s.category.clone(),
                 triggers: s.triggers.clone(),
                 tool_path: if self.sandbox_pool.is_some() {
+                    let pcfg = self.persistence.workspace_mgr.path_config();
                     s.tool.as_ref().map(|tool| {
                         if s.status == "builtin" {
-                            // 全局 skill → /user/global_skills/{category}/{key}/{tool}
-                            format!("/user/global_skills/{}/{}/{}", s.category, s.key, tool)
+                            format!("{}/{}/{}/{}/{}", pcfg.container_root, pcfg.global_skills_mount, s.category, s.key, tool)
                         } else {
-                            // workspace 私有 skill → /user/skills/{key}/{tool}
-                            format!("/user/skills/{}/{}", s.key, tool)
+                            // 根据实际磁盘路径推导容器路径
+                            let ws_root = self.persistence.workspace_mgr.workspace_dir(&workspace_key);
+                            if let Ok(rel) = s.skill_dir.strip_prefix(&ws_root) {
+                                format!("{}/{}/{}", pcfg.container_root, rel.display(), tool)
+                            } else {
+                                format!("{}/{}/{}/{}", pcfg.container_root, pcfg.skills_dir, s.key, tool)
+                            }
                         }
                     })
                 } else {

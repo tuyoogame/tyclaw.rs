@@ -125,6 +125,50 @@ workspace:
   idle_timeout_secs: 1800                 # 空闲超时（秒），超过后回收 Docker 容器和临时文件。0 = 不回收
 
 # ============================================================================
+# 路径配置（可选，全部有缺省值，不配置即使用默认值）
+# ============================================================================
+#
+# 【run-dir】通过命令行 --run-dir 指定（默认 workspace/），是整个系统的根目录。
+# 必须包含以下目录和文件：
+#   config/config.yaml      ← 本文件
+#   config/prompts.yaml     ← 提示词配置
+#   skills/                 ← 全局共享 Skill（只读挂载到容器）
+#   cases/                  ← 全局案例库
+#   audit/                  ← 审计日志（按天分文件）
+#   logs/                   ← 运行日志
+#   works/                  ← 所有用户的 workspace 数据（可通过 --works-dir 覆盖路径）
+#
+# 【per-user workspace】每个用户在 works/ 下有独立目录：
+#   works/{bucket}/{key}/   ← bucket=md5(key)[0:2], key 由 workspace.key_strategy 决定
+#   该目录整体挂载到 Docker 容器的 container_root（默认 /user）。
+#   以下 paths 配置中的目录名，全部相对于这个 per-user workspace 根目录。
+#
+# 例如：--run-dir workspace --works-dir /data/works
+#   → host: /data/works/d8/0307663902380/ 挂载到容器 /workspace/
+#   → skills_dir: "skills" → host: .../0307663902380/skills/ → 容器: /workspace/skills/
+#
+# 因为 per-user workspace 根目录通过 volume mount 映射，host 和容器内的相对路径完全一致。
+# 所以以下配置不区分 host 还是容器——写一份相对路径，两边通用。
+#
+# 提示词（prompts.yaml）中可用 ${VAR} 引用这些路径，运行时自动替换：
+#   ${CONTAINER_ROOT}, ${SKILLS_DIR}, ${MEMORY_DIR}, ${CASES_DIR},
+#   ${ATTACHMENTS_DIR}, ${TMP_DIR}, ${DISPATCHES_DIR},
+#   ${GLOBAL_SKILLS_DIR}, ${GLOBAL_SKILLS_PATH}
+#
+# paths:
+#   container_root: "/workspace"              # 容器挂载根路径（per-user workspace 挂载到此）
+#   container_workdir: "/workspace"           # 容器工作目录（docker exec -w）
+#   global_skills_mount: "skills"        # 全局 skills 在容器内的目录名（相对 container_root）
+#   skills_dir: "_personal/skills"       # 用户私有 Skill 目录（相对 per-user workspace 根）
+#   memory_dir: "memory"                 # 长期记忆目录（相对 per-user workspace 根）
+#   cases_dir: "cases"                   # 私有案例目录（相对 per-user workspace 根）
+#   attachments_dir: "work/attachments"  # 附件目录（相对 per-user workspace 根）
+#   tmp_dir: "work/tmp"                  # 临时文件目录（相对 per-user workspace 根）
+#   dispatches_dir: "work/dispatches"    # 子任务调度目录（相对 per-user workspace 根）
+#   history_file: "history.jsonl"        # 会话历史文件名（在 per-user workspace 根下）
+#   timer_file: "timer_jobs.json"        # 定时任务文件名（在 per-user workspace 根下）
+
+# ============================================================================
 # 钉钉机器人（可选，使用 --dingtalk 启动时需要）
 # ============================================================================
 # dingtalk:

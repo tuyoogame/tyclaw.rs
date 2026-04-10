@@ -43,6 +43,7 @@ pub struct OrchestratorBuilder {
     pub(crate) web_search_config: Option<WebSearchConfig>,
     pub(crate) control_config: Option<tyclaw_control::ControlConfig>,
     pub(crate) workspace_key_strategy: tyclaw_control::WorkspaceKeyStrategy,
+    pub(crate) path_config: tyclaw_control::PathConfig,
 }
 
 impl OrchestratorBuilder {
@@ -63,7 +64,13 @@ impl OrchestratorBuilder {
             web_search_config: None,
             control_config: None,
             workspace_key_strategy: tyclaw_control::WorkspaceKeyStrategy::default(),
+            path_config: tyclaw_control::PathConfig::default(),
         }
+    }
+
+    pub fn with_path_config(mut self, config: tyclaw_control::PathConfig) -> Self {
+        self.path_config = config;
+        self
     }
 
     pub fn with_workspace_key_strategy(mut self, strategy: tyclaw_control::WorkspaceKeyStrategy) -> Self {
@@ -216,6 +223,7 @@ impl OrchestratorBuilder {
             web_search_config,
             control_config,
             workspace_key_strategy,
+            path_config,
         } = self;
 
         // 初始化 nudge 提示词加载器（从 config/prompts/nudges/ 加载）
@@ -241,9 +249,12 @@ impl OrchestratorBuilder {
             features.clone(),
         );
 
+        // 初始化 prompt 路径变量替换
+        tyclaw_prompt::prompt_store::init_path_vars(path_config.to_prompt_vars());
+
         let context = ContextBuilder::new(&workspace);
         let persistence = PersistenceLayer {
-            workspace_mgr: WorkspaceManager::new(&workspace, workspace_key_strategy, workspaces_config),
+            workspace_mgr: WorkspaceManager::with_path_config(&workspace, workspace_key_strategy, workspaces_config, path_config),
             audit: AuditLog::new(workspace.join("audit")),
             case_store: CaseStore::new(workspace.join("cases")),
             sessions: SessionManager::new(&workspace),

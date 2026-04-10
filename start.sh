@@ -35,7 +35,7 @@ if [ "$CLEAN" = true ]; then
     > "$RUN_DIR/logs/tyclaw.log"
     echo "[ok] 日志已清空"
 
-    # 清空 works 下所有 workspace 的临时数据（保留 memory）
+    # 清空 works 下所有 workspace 的临时数据（保留 memory，清空 skills/cases/work/_personal/skills）
     if [ -d "$RUN_DIR/works" ]; then
         for bucket_dir in "$RUN_DIR"/works/*/; do
             [ -d "$bucket_dir" ] || continue
@@ -45,6 +45,7 @@ if [ "$CLEAN" = true ]; then
                 rm -f "$ws_dir/timer_jobs.json"
                 rm -rf "$ws_dir/skills/"*
                 rm -rf "$ws_dir/cases/"*
+                rm -rf "$ws_dir/_personal/skills/"*
                 rm -rf "$ws_dir/work/"*
             done
         done

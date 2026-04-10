@@ -9,6 +9,24 @@ use std::sync::OnceLock;
 use tracing::debug;
 
 static STORE: OnceLock<PromptStore> = OnceLock::new();
+static PATH_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// 初始化路径变量（从 PathConfig 生成）。应在 init() 之后调用。
+pub fn init_path_vars(vars: HashMap<String, String>) {
+    let _ = PATH_VARS.set(vars);
+}
+
+/// 对文本执行 `${VAR}` 变量替换。
+fn substitute_vars(text: &str) -> String {
+    let Some(vars) = PATH_VARS.get() else {
+        return text.to_string();
+    };
+    let mut result = text.to_string();
+    for (key, value) in vars {
+        result = result.replace(&format!("${{{}}}", key), value);
+    }
+    result
+}
 
 struct PromptStore {
     top: HashMap<String, String>,
@@ -39,12 +57,13 @@ pub fn get(key: &str) -> String {
     let store = STORE
         .get()
         .expect("FATAL: prompt_store 未初始化，请先调用 init()");
-    store
+    let value = store
         .top
         .get(key)
         .filter(|v| !v.is_empty())
         .cloned()
-        .unwrap_or_else(|| panic!("FATAL: prompts.yaml 缺少必需字段 '{key}'"))
+        .unwrap_or_else(|| panic!("FATAL: prompts.yaml 缺少必需字段 '{key}'"));
+    substitute_vars(&value)
 }
 
 /// 获取 node_types.{type} 的提示词。
@@ -52,12 +71,13 @@ pub fn get_node_type(node_type: &str) -> String {
     let store = STORE
         .get()
         .expect("FATAL: prompt_store 未初始化，请先调用 init()");
-    store
+    let value = store
         .node_types
         .get(node_type)
         .filter(|v| !v.is_empty())
         .cloned()
-        .unwrap_or_else(|| panic!("FATAL: prompts.yaml 缺少 node_types.'{node_type}'"))
+        .unwrap_or_else(|| panic!("FATAL: prompts.yaml 缺少 node_types.'{node_type}'"));
+    substitute_vars(&value)
 }
 
 /// 获取 nudges.{name} 的催促文本。
@@ -65,12 +85,13 @@ pub fn get_nudge(name: &str) -> String {
     let store = STORE
         .get()
         .expect("FATAL: prompt_store 未初始化，请先调用 init()");
-    store
+    let value = store
         .nudges
         .get(name)
         .filter(|v| !v.is_empty())
         .cloned()
-        .unwrap_or_else(|| panic!("FATAL: prompts.yaml 缺少 nudges.'{name}'"))
+        .unwrap_or_else(|| panic!("FATAL: prompts.yaml 缺少 nudges.'{name}'"));
+    substitute_vars(&value)
 }
 
 // ─── YAML Parser ────────────────────────────────────────────

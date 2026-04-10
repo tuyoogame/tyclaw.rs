@@ -34,7 +34,7 @@ impl Default for DockerConfig {
             memory: "512m".into(),
             cpus: "1".into(),
             network: "bridge".into(),
-            work_dir: "/user/work".into(),
+            work_dir: "/workspace".into(),
         }
     }
 }
@@ -46,7 +46,7 @@ pub struct DockerSandbox {
     container_name: String,
     /// 容器内挂载根目录（如 `/user`，对应整个 `works/{bucket}/{key}`）。
     mount_root: String,
-    /// 容器内工作目录（如 `/user/work`）。
+    /// 容器内工作目录（如 `/workspace`）。
     work_dir: String,
     /// workspace key（通常等于 user_id），注入为环境变量供 skill 脚本使用。
     workspace_key: String,
@@ -54,8 +54,8 @@ pub struct DockerSandbox {
 
 impl DockerSandbox {
     /// 将路径解析为容器内绝对路径。
-    /// 如果路径已经以 mount_root 开头（如 `/user/skills/foo`），直接返回；
-    /// 否则拼接 work_dir 前缀（如 `attachments/a.xlsx` → `/user/work/attachments/a.xlsx`）。
+    /// 如果路径已经以 mount_root 开头（如 `/workspace/skills/foo`），直接返回；
+    /// 否则拼接 work_dir 前缀（如 `attachments/a.xlsx` → `/workspace/attachments/a.xlsx`）。
     fn resolve(&self, path: &str) -> String {
         if path.starts_with(&self.mount_root) {
             path.to_string()
@@ -68,7 +68,7 @@ impl DockerSandbox {
 #[async_trait]
 impl Sandbox for DockerSandbox {
     async fn exec(&self, cmd: &str, timeout: Duration) -> Result<SandboxExecResult, TyclawError> {
-        let tmpdir = format!("{}/tmp", self.work_dir);
+        let tmpdir = format!("{}/work/tmp", self.work_dir);
         let result = tokio::time::timeout(
             timeout,
             Command::new("docker")
@@ -533,7 +533,9 @@ impl Sandbox for DockerSandbox {
     }
 
     fn workspace_root(&self) -> &str {
-        &self.work_dir
+        // 返回工作文件根（dispatches/attachments/tmp 所在的容器路径）
+        // 固定为 {mount_root}/work，不受 workdir 变化影响
+        "/workspace/work"
     }
 
     fn id(&self) -> &str {
@@ -638,11 +640,11 @@ impl DockerPool {
         let mount_root = user_mount_root(&self.config.work_dir);
         let mount_arg = format!("{}:{}", ws_root_abs.display(), mount_root);
 
-        // 全局 skills 目录只读挂载到容器内 /user/global_skills
+        // 全局 skills 目录只读挂载到容器内 /user/skills（与 PathConfig.global_skills_mount 一致）
         let global_skills = self.root.join("skills");
         let global_skills_abs = std::fs::canonicalize(&global_skills)
             .unwrap_or_else(|_| global_skills.clone());
-        let global_skills_mount = format!("{}:{}/global_skills:ro", global_skills_abs.display(), mount_root);
+        let global_skills_mount = format!("{}:{}/skills:ro", global_skills_abs.display(), mount_root);
 
         info!(
             workspace_key = %workspace_key,
@@ -653,7 +655,7 @@ impl DockerPool {
             "Preparing per-workspace docker mount"
         );
 
-        let tmpdir_env = format!("TMPDIR={}/tmp", self.config.work_dir);
+        let tmpdir_env = format!("TMPDIR={}/work/tmp", self.config.work_dir);
         let output = Command::new("docker")
             .args([
                 "run",
@@ -816,10 +818,7 @@ impl SandboxPool for DockerPool {
     }
 }
 
-fn user_mount_root(work_dir: &str) -> String {
-    let path = std::path::Path::new(work_dir);
-    path.parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| "/user".to_string())
+fn user_mount_root(_work_dir: &str) -> String {
+    // workspace 根目录始终挂载到 /user，不依赖 workdir 推导
+    "/workspace".to_string()
 }
