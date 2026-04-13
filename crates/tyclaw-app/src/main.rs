@@ -589,19 +589,22 @@ async fn run_outbound_dispatcher(
             OutboundEvent::Progress { message, .. } => {
                 if message.starts_with("[Thinking]") {
                     let content = message.strip_prefix("[Thinking]\n").unwrap_or(message);
-                    println!("\x1b[2m[Thinking] {content}\x1b[0m");
+                    println!("\x1b[2m\x1b[35m◆ {content}\x1b[0m");
                 } else if message.contains("[sandbox]") || message.contains("[已创建任务") {
                     // sandbox 容器操作：绿色
                     println!("\x1b[32m{message}\x1b[0m");
                 } else if message.contains("[轮次") || message.contains("[Token]") {
                     // 轮次和 Token 统计：白色（默认色）
                     println!("{message}");
+                } else if message.starts_with("[dispatch]") {
+                    // dispatch 开始/结束：黄色 + 分隔线
+                    println!("\x1b[33m─── {message} ───\x1b[0m");
                 } else if message.starts_with('[') {
-                    // 已有前缀的系统消息（[dispatch]、[scheduler] 等）：灰色原样输出
+                    // 已有前缀的系统消息（[scheduler] 等）：灰色原样输出
                     println!("\x1b[2m{message}\x1b[0m");
                 } else {
-                    // 主 LLM 的 content 输出：灰色，加 [main] 前缀，与 [sub:xxx] 区分
-                    println!("\x1b[2m[main] {message}\x1b[0m");
+                    // 主 LLM 的 content 输出：正常亮度，加 ▌ 前缀标识主线程
+                    println!("\x1b[37m▌\x1b[0m {message}");
                 }
             }
             OutboundEvent::Thinking { content, .. } => {

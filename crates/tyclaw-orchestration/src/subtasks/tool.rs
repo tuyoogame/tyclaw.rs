@@ -356,7 +356,7 @@ impl Tool for DispatchSubtasksTool {
             .map(|n| format!("{}({})", n.id, n.node_type))
             .collect();
         eprintln!(
-            "[dispatch] executing plan: {} subtasks: {:?}",
+            "\x1b[33m─── [dispatch] executing plan: {} subtasks: {:?} ───\x1b[0m",
             plan.id, subtask_summary
         );
         info!(

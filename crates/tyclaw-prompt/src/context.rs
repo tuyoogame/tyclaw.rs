@@ -463,7 +463,12 @@ Your workspace is at: {ws}"#
         rendered.join("\n\n---\n\n")
     }
 
-    fn render_user_context_message(entries: &[PromptContextEntry]) -> Option<String> {
+    /// 构建带任务焦点提示的 user context 消息。
+    /// 在末尾追加当前用户请求的摘要，防止大量上下文噪音淹没实际任务。
+    fn render_user_context_with_focus(
+        entries: &[PromptContextEntry],
+        current_message: &str,
+    ) -> Option<String> {
         if entries.is_empty() {
             return None;
         }
@@ -474,8 +479,14 @@ Your workspace is at: {ws}"#
             .collect::<Vec<_>>()
             .join("\n\n");
 
+        // 截取用户消息前 200 字符作为任务焦点
+        let focus: String = current_message.chars().take(200).collect();
+        let focus_section = format!(
+            "# Current Task Focus\n**The user's current request is:** {focus}\nRespond to the user's actual request above. The context sections above are reference material — use them only if relevant."
+        );
+
         Some(format!(
-            "{USER_CONTEXT_TAG}\nAs you answer the user's request, you can use the following context:\n{body}\n\nIMPORTANT: this context may or may not be relevant to the current task. Follow it when it constrains how you should work, but do not respond to it as though it were the user's request."
+            "{USER_CONTEXT_TAG}\nAs you answer the user's request, you can use the following context:\n{body}\n\n{focus_section}"
         ))
     }
 
@@ -603,7 +614,9 @@ Your workspace is at: {ws}"#
             Self::render_system_prompt_parts(&planned.system_prompt_parts, &planned.system_context);
 
         let mut messages = vec![system_message(&system)];
-        if let Some(user_context) = Self::render_user_context_message(&planned.user_context) {
+        if let Some(user_context) =
+            Self::render_user_context_with_focus(&planned.user_context, current_message)
+        {
             messages.push(user_message(&user_context));
         }
         messages.extend(history.iter().cloned());
@@ -622,7 +635,9 @@ Your workspace is at: {ws}"#
             Self::render_system_prompt_parts(&planned.system_prompt_parts, &planned.system_context);
 
         let mut messages = vec![system_message(&system)];
-        if let Some(user_context) = Self::render_user_context_message(&planned.user_context) {
+        if let Some(user_context) =
+            Self::render_user_context_with_focus(&planned.user_context, current_message)
+        {
             messages.push(user_message(&user_context));
         }
         messages.extend(history.iter().cloned());

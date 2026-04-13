@@ -162,7 +162,7 @@ impl NodeExecutor {
             messages.len()
         ));
 
-        // 子 agent 进度回调：带 node_id 前缀，统一 dim 灰色
+        // 子 agent 进度回调：缩进 + 青色竖线，与 main 形成视觉层级
         // [heartbeat] 消息通过 task_local 转发给父 agent 的通道（钉钉等）
         let node_id_for_cb = node.id.clone();
         let sub_progress: OnProgress = Box::new(move |msg: &str| {
@@ -176,7 +176,11 @@ impl NodeExecutor {
                     return;
                 }
                 let (_, content) = parse_thinking_prefix(&msg);
-                eprintln!("\x1b[2m[sub:{}] {}\x1b[0m", node_id, content);
+                // 青色竖线 + 缩进，让 sub 输出在视觉上缩进于 main 之下
+                // 多行内容每行都加前缀，保持对齐
+                for line in content.lines() {
+                    eprintln!("\x1b[36m  │\x1b[0m \x1b[2m\x1b[36m[{}]\x1b[0m \x1b[2m{}\x1b[0m", node_id, line);
+                }
             })
         });
 
