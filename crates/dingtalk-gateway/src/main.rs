@@ -39,7 +39,7 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).init();
 
     let args = Args::parse();
     let cfg = config::load(std::path::Path::new(&args.config));

@@ -54,6 +54,8 @@ pub struct IncomingMessage {
     /// 上游连接编号
     #[allow(dead_code)]
     pub conn_id: usize,
+    /// 钉钉 Stream 帧 topic（用于区分聊天消息 / 卡片回调等）
+    pub topic: String,
 }
 
 /// 启动上游连接池。
@@ -113,7 +115,10 @@ async fn open_and_run(
     let body = serde_json::json!({
         "clientId": client_id,
         "clientSecret": client_secret,
-        "subscriptions": [{"type": "CALLBACK", "topic": "/v1.0/im/bot/messages/get"}],
+        "subscriptions": [
+            {"type": "CALLBACK", "topic": "/v1.0/im/bot/messages/get"},
+            {"type": "CALLBACK", "topic": "/v1.0/card/instances/callback"},
+        ],
         "ua": "dingtalk-gateway/0.1",
     });
     let resp: ConnectionResponse = http
@@ -195,7 +200,15 @@ async fn open_and_run(
             }
         };
 
-        // 解析会话信息
+        let topic = frame
+            .headers
+            .as_ref()
+            .and_then(|h| h.get("topic"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // 解析路由字段（卡片回调用 userId，聊天消息用 senderStaffId/senderId）
         let parsed: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
         let conversation_id = parsed
             .get("conversationId")
@@ -205,6 +218,7 @@ async fn open_and_run(
         let sender_id = parsed
             .get("senderStaffId")
             .or_else(|| parsed.get("senderId"))
+            .or_else(|| parsed.get("userId"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -212,11 +226,11 @@ async fn open_and_run(
         info!(
             conn_id,
             message_id = %msg_id,
+            topic = %topic,
             conversation_id = %conversation_id,
             sender_id = %sender_id,
             data_len = data.len(),
-            frame_type = ?frame.frame_type,
-            "Upstream: received chatbot message, forwarding to dispatcher"
+            "Upstream: received message, forwarding to dispatcher"
         );
 
         let incoming = IncomingMessage {
@@ -225,6 +239,7 @@ async fn open_and_run(
             conversation_id,
             sender_id,
             conn_id,
+            topic,
         };
 
         if tx.send(incoming).await.is_err() {

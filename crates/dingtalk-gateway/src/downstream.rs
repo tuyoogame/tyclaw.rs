@@ -232,15 +232,22 @@ impl DownstreamManager {
     /// - route_table: sender_id 查 rules → label，未命中走 default label
     /// - hash: sender_id 哈希，有 weights 则灰度分流，无 weights 则均匀分配
     pub async fn dispatch(&self, msg: &IncomingMessage) {
+        let is_chatbot = msg.topic.is_empty()
+            || msg.topic == "/v1.0/im/bot/messages/get";
+
         if !self.is_ready() {
             warn!(message_id = %msg.message_id, "Gateway not ready, message dropped");
-            send_maintenance_reply(msg).await;
+            if is_chatbot {
+                send_maintenance_reply(msg).await;
+            }
             return;
         }
 
         let backends = self.backends.read().await;
         if backends.is_empty() {
-            send_maintenance_reply(msg).await;
+            if is_chatbot {
+                send_maintenance_reply(msg).await;
+            }
             return;
         }
 
@@ -251,6 +258,7 @@ impl DownstreamManager {
             "message_id": msg.message_id,
             "conversation_id": msg.conversation_id,
             "sender_id": msg.sender_id,
+            "topic": msg.topic,
             "data": msg.data,
         });
         let json = match serde_json::to_string(&envelope) {
