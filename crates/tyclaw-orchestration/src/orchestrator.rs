@@ -870,10 +870,12 @@ impl Orchestrator {
                 tool_path: if self.sandbox_pool.is_some() {
                     let pcfg = self.persistence.workspace_mgr.path_config();
                     s.tool.as_ref().map(|tool| {
-                        if s.status == "builtin" {
+                        if tool.starts_with("tools/") || tool.starts_with("skills/") {
+                            // 全局路径（如 tools/ga_query.py, skills/xxx/tool.py）
+                            format!("{}/{}", pcfg.container_root, tool)
+                        } else if s.status == "builtin" {
                             format!("{}/{}/{}/{}/{}", pcfg.container_root, pcfg.global_skills_mount, s.category, s.key, tool)
                         } else {
-                            // 根据实际磁盘路径推导容器路径
                             let ws_root = self.persistence.workspace_mgr.workspace_dir(&workspace_key);
                             if let Ok(rel) = s.skill_dir.strip_prefix(&ws_root) {
                                 format!("{}/{}/{}", pcfg.container_root, rel.display(), tool)

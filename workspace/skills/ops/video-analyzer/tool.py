@@ -406,8 +406,7 @@ def main():
 
     staff_id = os.environ.get("TYCLAW_SENDER_STAFF_ID", "unknown")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tmpdir = os.environ.get("TMPDIR", "/tmp")
-    output_dir = args.output_dir or f"{tmpdir}/tyclaw_{staff_id}_{ts}_video-analyzer"
+    output_dir = args.output_dir or f"/tmp/tyclaw_{staff_id}_{ts}_video-analyzer"
 
     run(args.video, output_dir,
         threshold=args.threshold,

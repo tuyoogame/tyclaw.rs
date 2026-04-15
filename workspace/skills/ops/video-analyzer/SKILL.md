@@ -8,7 +8,8 @@ triggers:
   - 处理视频
   - 视频截帧
   - 视频场景
-tool: tool.py
+tool: skills/video-analyzer/tool.py
+default: false
 ---
 # 视频处理
 
@@ -45,7 +46,7 @@ python skills/video-analyzer/tool.py video.mp4 --frame-width 720
 
 ## 输出
 
-输出到 `$TMPDIR/tyclaw_{staff_id}_{timestamp}_video-analyzer/`（容器内 TMPDIR 默认为 `/user/work/tmp`）：
+输出到 `/tmp/tyclaw_{staff_id}_{timestamp}_video-analyzer/`：
 
 ```
 frames/          关键帧图片（scene_001.jpg, scene_002.jpg, ...）
@@ -88,13 +89,13 @@ video.mp4        源视频文件
 
 1. 运行 tool.py 处理视频，获得 scenes.json 和关键帧
 2. 读取 scenes.json 了解视频结构（场景数、时长分布、静音段）
-3. 用 read_file 读取 frames/ 中的关键帧图片（每次 3-5 张），图片会自动作为视觉输入返回，你可以直接看到并分析画面内容
+3. 查看 frames/ 中的关键帧图片（每次 3-5 张），理解各场景画面内容
 4. 根据用户需求回答问题或生成分析报告
 
 工具负责处理和提取，AI 负责理解和分析。如果用户需要特定的评分体系或分类规则，建议用户创建个人 Skill 来定义自己的分析标准。
 
 ## 安全约束
 
-1. 输出路径必须在 `$TMPDIR/tyclaw_{staff_id}_` 前缀下
-2. 完成后将分析结果放在 `## 答复内容` 段落中
+1. 输出路径必须在 `/tmp/tyclaw_{staff_id}_` 前缀下
+2. 完成后直接输出分析结果
 3. 如需发送场景切片或帧图给用户，在 `## 附件文件` 段落中列出完整路径

@@ -640,11 +640,23 @@ impl DockerPool {
         let mount_root = user_mount_root(&self.config.work_dir);
         let mount_arg = format!("{}:{}", ws_root_abs.display(), mount_root);
 
-        // 全局 skills 目录只读挂载到容器内 /user/skills（与 PathConfig.global_skills_mount 一致）
+        // 全局 skills 目录只读挂载到容器内 /workspace/skills
         let global_skills = self.root.join("skills");
         let global_skills_abs = std::fs::canonicalize(&global_skills)
             .unwrap_or_else(|_| global_skills.clone());
         let global_skills_mount = format!("{}:{}/skills:ro", global_skills_abs.display(), mount_root);
+
+        // 全局 tools 目录只读挂载到容器内 /workspace/tools
+        let global_tools = self.root.join("tools");
+        let global_tools_abs = std::fs::canonicalize(&global_tools)
+            .unwrap_or_else(|_| global_tools.clone());
+        let global_tools_mount = format!("{}:{}/tools:ro", global_tools_abs.display(), mount_root);
+
+        // defaults.py 挂载到容器根目录（tools/ 下的脚本通过 from defaults import 引用）
+        let defaults_py = self.root.join("defaults.py");
+        let defaults_py_abs = std::fs::canonicalize(&defaults_py)
+            .unwrap_or_else(|_| defaults_py.clone());
+        let defaults_mount = format!("{}:{}/defaults.py:ro", defaults_py_abs.display(), mount_root);
 
         info!(
             workspace_key = %workspace_key,
@@ -652,6 +664,7 @@ impl DockerPool {
             container_root = %mount_root,
             container_workdir = %self.config.work_dir,
             global_skills = %global_skills_abs.display(),
+            global_tools = %global_tools_abs.display(),
             "Preparing per-workspace docker mount"
         );
 
@@ -680,6 +693,10 @@ impl DockerPool {
                 &mount_arg,
                 "-v",
                 &global_skills_mount,
+                "-v",
+                &global_tools_mount,
+                "-v",
+                &defaults_mount,
                 "-w",
                 &self.config.work_dir,
                 &self.config.image,

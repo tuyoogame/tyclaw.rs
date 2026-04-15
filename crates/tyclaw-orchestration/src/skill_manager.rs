@@ -30,10 +30,28 @@ pub struct SkillMeta {
 
 impl SkillMeta {
     /// 返回技能工具脚本的绝对路径（如果 frontmatter 配置了 tool 字段）。
+    ///
+    /// 对于 `tools/xxx.py` 或 `skills/xxx/tool.py` 这种全局路径，
+    /// 通过 skill_dir 的祖先目录定位 workspace root 来拼接；
+    /// 其余情况视为 skill 目录内的相对路径。
     pub fn tool_path(&self) -> Option<String> {
-        self.tool
-            .as_ref()
-            .map(|tool| self.skill_dir.join(tool).to_string_lossy().to_string())
+        self.tool.as_ref().map(|tool| {
+            if tool.starts_with("tools/") || tool.starts_with("skills/") {
+                // builtin: skill_dir = {root}/skills/{cat}/{key} → root = parent^3
+                // workspace: skill_dir = {ws}/skills/{key} → root = parent^2
+                let root = if self.status == "builtin" {
+                    self.skill_dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+                } else {
+                    self.skill_dir.parent().and_then(|p| p.parent())
+                };
+                match root {
+                    Some(r) => r.join(tool).to_string_lossy().to_string(),
+                    None => self.skill_dir.join(tool).to_string_lossy().to_string(),
+                }
+            } else {
+                self.skill_dir.join(tool).to_string_lossy().to_string()
+            }
+        })
     }
 }
 
@@ -430,5 +448,92 @@ mod tests {
         assert_eq!(skills[0].name, "Debug");
         assert_eq!(skills[0].category, "debug");
         assert_eq!(skills[0].status, "builtin");
+    }
+
+    #[test]
+    fn test_scan_real_workspace_skills() {
+        let ws_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../workspace");
+        let builtin_dir = ws_root.join("skills");
+        if !builtin_dir.is_dir() {
+            return; // CI 或没有 workspace 目录时跳过
+        }
+
+        let mgr = SkillManager::new(builtin_dir, ws_root.clone());
+        let skills = mgr.scan_builtin();
+
+        // 验证 19 个 Skill 全部被扫描到
+        assert_eq!(skills.len(), 19, "expected 19 skills, got {}: {:?}",
+            skills.len(), skills.iter().map(|s| &s.key).collect::<Vec<_>>());
+
+        // 验证 5 个 category
+        let mut cats: Vec<String> = skills.iter().map(|s| s.category.clone()).collect();
+        cats.sort();
+        cats.dedup();
+        assert_eq!(cats, vec!["data", "dingtalk", "meta", "office", "ops"]);
+
+        // 验证所有 skill 都是 builtin 状态
+        for s in &skills {
+            assert_eq!(s.status, "builtin", "skill {} should be builtin", s.key);
+        }
+
+        // 验证 name 不为空
+        for s in &skills {
+            assert!(!s.name.is_empty(), "skill {} has empty name", s.key);
+        }
+    }
+
+    #[test]
+    fn test_tool_path_global_tools() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let builtin = root.join("skills");
+        let skill_dir = builtin.join("data").join("ga-query");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: GA\ntool: tools/ga_query.py\n---\n",
+        )
+        .unwrap();
+
+        // 创建 tools/ 目录以验证路径拼接
+        let tools_dir = root.join("tools");
+        fs::create_dir_all(&tools_dir).unwrap();
+        fs::write(tools_dir.join("ga_query.py"), "# stub").unwrap();
+
+        let mgr = SkillManager::new(builtin, root.to_path_buf());
+        let skills = mgr.scan_builtin();
+        assert_eq!(skills.len(), 1);
+
+        let s = &skills[0];
+        assert_eq!(s.tool.as_deref(), Some("tools/ga_query.py"));
+
+        // builtin skill_dir = root/skills/data/ga-query → parent^3 = root
+        let tp = s.tool_path().unwrap();
+        let expected = root.join("tools/ga_query.py").to_string_lossy().to_string();
+        assert_eq!(tp, expected, "tool_path should resolve to global tools/");
+    }
+
+    #[test]
+    fn test_tool_path_local_tool() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let builtin = root.join("skills");
+        let skill_dir = builtin.join("ops").join("video-analyzer");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: Video\ntool: tool.py\n---\n",
+        )
+        .unwrap();
+
+        let mgr = SkillManager::new(builtin, root.to_path_buf());
+        let skills = mgr.scan_builtin();
+        let s = &skills[0];
+
+        // tool.py 是 skill 目录内的脚本，应该用 skill_dir.join()
+        let tp = s.tool_path().unwrap();
+        let expected = skill_dir.join("tool.py").to_string_lossy().to_string();
+        assert_eq!(tp, expected, "tool_path should resolve relative to skill_dir");
     }
 }
