@@ -1257,163 +1257,163 @@ fn sanitize_messages(messages: &[HashMap<String, Value>]) -> Vec<Value> {
 /// - 收集所有 tool 消息的 tool_call_id
 /// - 对缺失 result 的 tool_call，补一条占位 tool 消息
 /// - 对找不到 tool_call 的孤立 tool 消息，直接移除
+/// 确保 tool_call / tool_result 严格配对，修复所有已知的配对问题。
+///
+/// 设计原则：**简单暴力，宁可丢信息也不发坏数据**。
+/// 不做复杂的"猜测修补"，而是按三条铁律过滤：
+///
+/// 1. 每个 tool_call id 全局唯一（重复的只保留第一组）
+/// 2. 每个 tool_result 必须有对应的 tool_call（孤立的直接丢）
+/// 3. 每个 tool_call 必须有对应的 tool_result（缺失的补占位符）
+///
+/// 最后确保消息不以 assistant 结尾（Anthropic 要求）。
 fn ensure_tool_call_pairs(messages: Vec<Value>) -> Vec<Value> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
-    // 收集所有 tool_call id 及其在消息列表中的位置
-    let mut call_ids: Vec<(usize, String, String)> = Vec::new(); // (assistant_idx, call_id, function_name)
-    let mut result_ids: HashSet<String> = HashSet::new();
+    let mut output: Vec<Value> = Vec::with_capacity(messages.len());
 
-    for (i, msg) in messages.iter().enumerate() {
+    // 全局已出现的 tool_call id（用于检测跨轮重复）
+    let mut global_call_ids: HashSet<String> = HashSet::new();
+    // 当前 assistant 消息声明的 tool_call ids（等待配对）
+    let mut pending_call_ids: Vec<(String, String)> = Vec::new(); // (id, function_name)
+    // 当前 assistant 消息已配对的 tool_result ids
+    let mut matched_result_ids: HashSet<String> = HashSet::new();
+    // 重复 id 的重映射表（原 id → 新唯一 id），确保 assistant 和 tool_result 同步
+    let mut id_remap: HashMap<String, String> = HashMap::new();
+    let mut dedup_counter: usize = 0;
+
+    let mut fixes = 0usize;
+
+    for msg in messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        if role == "assistant" {
-            if let Some(Value::Array(tcs)) = msg.get("tool_calls") {
-                for tc in tcs {
-                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                        let fname = tc.pointer("/function/name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        call_ids.push((i, id.to_string(), fname.to_string()));
+
+        match role {
+            "assistant" => {
+                // 先把上一个 assistant 的未配对 tool_calls 补占位符
+                flush_pending(&mut output, &pending_call_ids, &matched_result_ids, &mut fixes);
+                pending_call_ids.clear();
+                matched_result_ids.clear();
+                // 当前 assistant 的 id 重映射表：原 id → 新 id
+                id_remap.clear();
+
+                if let Some(Value::Array(tcs)) = msg.get("tool_calls") {
+                    let mut patched_tcs: Vec<Value> = Vec::new();
+                    for tc in tcs {
+                        if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                            let fname = tc.pointer("/function/name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            // 如果 id 全局重复，分配新 id
+                            let actual_id = if global_call_ids.contains(id) {
+                                dedup_counter += 1;
+                                let new_id = format!("{id}_d{dedup_counter}");
+                                id_remap.insert(id.to_string(), new_id.clone());
+                                fixes += 1;
+                                new_id
+                            } else {
+                                id.to_string()
+                            };
+                            global_call_ids.insert(actual_id.clone());
+                            pending_call_ids.push((actual_id.clone(), fname.to_string()));
+
+                            // 构建 patched tool_call
+                            let mut tc_clone = tc.clone();
+                            if let Some(obj) = tc_clone.as_object_mut() {
+                                obj.insert("id".into(), Value::String(actual_id));
+                            }
+                            patched_tcs.push(tc_clone);
+                        }
                     }
+
+                    if patched_tcs.is_empty() {
+                        // 无有效 tool_calls，保留 content 部分
+                        let mut cleaned = msg.as_object().cloned().unwrap_or_default();
+                        cleaned.remove("tool_calls");
+                        if cleaned.get("content").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+                            output.push(Value::Object(cleaned));
+                        }
+                    } else {
+                        let mut cleaned = msg.as_object().cloned().unwrap_or_default();
+                        cleaned.insert("tool_calls".into(), Value::Array(patched_tcs));
+                        output.push(Value::Object(cleaned));
+                    }
+                } else {
+                    output.push(msg);
                 }
             }
-        } else if role == "tool" {
-            if let Some(id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
-                result_ids.insert(id.to_string());
-            }
-        }
-    }
 
-    let all_call_ids: HashSet<String> = call_ids.iter().map(|(_, id, _)| id.clone()).collect();
+            "tool" => {
+                if let Some(tcid) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    // 如果这个 id 被 remap 过，用新 id
+                    let actual_id = id_remap.get(tcid).cloned().unwrap_or_else(|| tcid.to_string());
+                    let is_expected = pending_call_ids.iter().any(|(id, _)| *id == actual_id);
+                    let already_matched = matched_result_ids.contains(&actual_id);
 
-    // 检测重复的 tool_call id（同一 id 出现多次会导致 Anthropic 400）
-    let mut seen_call_ids: HashSet<String> = HashSet::new();
-    let mut duplicate_call_ids: HashSet<String> = HashSet::new();
-    for (_, id, _) in &call_ids {
-        if !seen_call_ids.insert(id.clone()) {
-            duplicate_call_ids.insert(id.clone());
-        }
-    }
-    if !duplicate_call_ids.is_empty() {
-        warn!(
-            count = duplicate_call_ids.len(),
-            ids = ?duplicate_call_ids,
-            "Duplicate tool_call ids detected, will keep only first occurrence"
-        );
-    }
-
-    // 找出两种 orphan
-    let orphan_calls: Vec<&(usize, String, String)> = call_ids
-        .iter()
-        .filter(|(_, id, _)| !result_ids.contains(id))
-        .collect();
-    let has_orphan_results = result_ids.iter().any(|id| !all_call_ids.contains(id));
-
-    if orphan_calls.is_empty() && !has_orphan_results {
-        return messages;
-    }
-
-    if !orphan_calls.is_empty() {
-        warn!(
-            orphan_count = orphan_calls.len(),
-            orphan_ids = ?orphan_calls.iter().map(|(_, id, _)| id.as_str()).collect::<Vec<_>>(),
-            "Patching missing tool result messages"
-        );
-    }
-    if has_orphan_results {
-        let orphan_result_ids: Vec<&String> = result_ids.iter().filter(|id| !all_call_ids.contains(*id)).collect();
-        warn!(
-            orphan_count = orphan_result_ids.len(),
-            orphan_ids = ?orphan_result_ids,
-            "Removing orphan tool result messages (no matching tool_call)"
-        );
-    }
-
-    // 一次遍历：移除 orphan results + 补 missing results + 去重 duplicate ids
-    let mut output = Vec::with_capacity(messages.len() + orphan_calls.len());
-    // 分离两个追踪集：assistant 去重和 tool result 去重各自独立，
-    // 避免 assistant 侧的 insert 让后续合法 tool result 被误判为"已 emit"
-    let mut seen_assistant_dup_ids: HashSet<String> = HashSet::new();
-    let mut emitted_tool_result_ids: HashSet<String> = HashSet::new();
-    for (i, msg) in messages.into_iter().enumerate() {
-        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-
-        // 跳过 orphan tool results
-        if role == "tool" {
-            if let Some(tcid) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
-                if !all_call_ids.contains(tcid) {
-                    continue; // orphan result, skip
-                }
-                if !emitted_tool_result_ids.insert(tcid.to_string()) {
-                    warn!(
-                        tool_call_id = tcid,
-                        "Skipping duplicate tool_result (id already paired)"
-                    );
-                    continue;
-                }
-            }
-        }
-
-        // 对 assistant 消息，去掉重复 id 的 tool_calls（只保留第一次出现的）
-        if role == "assistant" && !duplicate_call_ids.is_empty() {
-            if let Some(Value::Array(tcs)) = msg.get("tool_calls") {
-                let filtered_tcs: Vec<Value> = tcs.iter()
-                    .filter(|tc| {
-                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        if duplicate_call_ids.contains(id) {
-                            seen_assistant_dup_ids.insert(id.to_string())
+                    if is_expected && !already_matched {
+                        matched_result_ids.insert(actual_id.clone());
+                        // 如果 id 被 remap 了，更新 tool_result 的 tool_call_id
+                        if actual_id != tcid {
+                            let mut patched = msg.as_object().cloned().unwrap_or_default();
+                            patched.insert("tool_call_id".into(), Value::String(actual_id));
+                            output.push(Value::Object(patched));
                         } else {
-                            true
+                            output.push(msg);
                         }
-                    })
-                    .cloned()
-                    .collect();
-                let has_removed = filtered_tcs.len() < tcs.len();
-                if has_removed {
-                    if filtered_tcs.is_empty() {
-                        continue;
+                    } else {
+                        fixes += 1; // 孤立 or 重复，丢弃
                     }
-                    let mut cleaned = msg.as_object().cloned().unwrap_or_default();
-                    cleaned.insert("tool_calls".into(), Value::Array(filtered_tcs));
-                    output.push(Value::Object(cleaned));
-                    for (asst_idx, call_id, fname) in &orphan_calls {
-                        if *asst_idx == i {
-                            output.push(json!({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "name": fname,
-                                "content": "(result truncated by context compression)"
-                            }));
-                        }
-                    }
-                    continue;
+                } else {
+                    output.push(msg);
                 }
             }
-        }
 
-        output.push(msg);
-        for (asst_idx, call_id, fname) in &orphan_calls {
-            if *asst_idx == i {
-                output.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": fname,
-                    "content": "(result truncated by context compression)"
-                }));
+            _ => {
+                // user / system 消息：先 flush 上一个 assistant 的未配对 tool_calls
+                flush_pending(&mut output, &pending_call_ids, &matched_result_ids, &mut fixes);
+                pending_call_ids.clear();
+                matched_result_ids.clear();
+                output.push(msg);
             }
         }
     }
 
-    // Anthropic 要求消息必须以 user 或 tool 结尾，不能以 assistant 结尾
+    // 最后一个 assistant 的未配对 tool_calls
+    flush_pending(&mut output, &pending_call_ids, &matched_result_ids, &mut fixes);
+
+    // Anthropic 要求消息必须以 user 或 tool 结尾
     if let Some(last) = output.last() {
         let last_role = last.get("role").and_then(|v| v.as_str()).unwrap_or("");
         if last_role == "assistant" {
-            warn!("Messages end with assistant, appending empty user message to satisfy Anthropic API");
             output.push(json!({"role": "user", "content": "continue"}));
+            fixes += 1;
         }
     }
 
+    if fixes > 0 {
+        warn!(fixes, "ensure_tool_call_pairs applied fixes");
+    }
+
     output
+}
+
+/// 为 pending_call_ids 中未配对的 tool_call 补占位 tool_result。
+fn flush_pending(
+    output: &mut Vec<Value>,
+    pending: &[(String, String)],
+    matched: &std::collections::HashSet<String>,
+    fixes: &mut usize,
+) {
+    for (id, fname) in pending {
+        if !matched.contains(id) {
+            output.push(json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "name": fname,
+                "content": "(result unavailable)"
+            }));
+            *fixes += 1;
+        }
+    }
 }
 
 fn should_write_llm_request_snapshots() -> bool {
