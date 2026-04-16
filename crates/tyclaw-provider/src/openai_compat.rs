@@ -1331,7 +1331,10 @@ fn ensure_tool_call_pairs(messages: Vec<Value>) -> Vec<Value> {
 
     // 一次遍历：移除 orphan results + 补 missing results + 去重 duplicate ids
     let mut output = Vec::with_capacity(messages.len() + orphan_calls.len());
-    let mut emitted_call_ids: HashSet<String> = HashSet::new();
+    // 分离两个追踪集：assistant 去重和 tool result 去重各自独立，
+    // 避免 assistant 侧的 insert 让后续合法 tool result 被误判为"已 emit"
+    let mut seen_assistant_dup_ids: HashSet<String> = HashSet::new();
+    let mut emitted_tool_result_ids: HashSet<String> = HashSet::new();
     for (i, msg) in messages.into_iter().enumerate() {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -1341,8 +1344,7 @@ fn ensure_tool_call_pairs(messages: Vec<Value>) -> Vec<Value> {
                 if !all_call_ids.contains(tcid) {
                     continue; // orphan result, skip
                 }
-                // 每个 tool_call_id 只允许一个 tool_result（跳过重复的）
-                if !emitted_call_ids.insert(tcid.to_string()) {
+                if !emitted_tool_result_ids.insert(tcid.to_string()) {
                     warn!(
                         tool_call_id = tcid,
                         "Skipping duplicate tool_result (id already paired)"
@@ -1355,14 +1357,13 @@ fn ensure_tool_call_pairs(messages: Vec<Value>) -> Vec<Value> {
         // 对 assistant 消息，去掉重复 id 的 tool_calls（只保留第一次出现的）
         if role == "assistant" && !duplicate_call_ids.is_empty() {
             if let Some(Value::Array(tcs)) = msg.get("tool_calls") {
-                // 过滤：对重复 id 只保留首次出现（通过 emitted_call_ids 追踪）
                 let filtered_tcs: Vec<Value> = tcs.iter()
                     .filter(|tc| {
                         let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         if duplicate_call_ids.contains(id) {
-                            emitted_call_ids.insert(id.to_string()) // 首次 insert 返回 true=保留
+                            seen_assistant_dup_ids.insert(id.to_string())
                         } else {
-                            true // 非重复 id 总是保留
+                            true
                         }
                     })
                     .cloned()
@@ -1370,13 +1371,11 @@ fn ensure_tool_call_pairs(messages: Vec<Value>) -> Vec<Value> {
                 let has_removed = filtered_tcs.len() < tcs.len();
                 if has_removed {
                     if filtered_tcs.is_empty() {
-                        // 所有 tool_calls 都是重复的，跳过整个 assistant 消息
                         continue;
                     }
                     let mut cleaned = msg.as_object().cloned().unwrap_or_default();
                     cleaned.insert("tool_calls".into(), Value::Array(filtered_tcs));
                     output.push(Value::Object(cleaned));
-                    // 补 missing results
                     for (asst_idx, call_id, fname) in &orphan_calls {
                         if *asst_idx == i {
                             output.push(json!({
@@ -1393,7 +1392,6 @@ fn ensure_tool_call_pairs(messages: Vec<Value>) -> Vec<Value> {
         }
 
         output.push(msg);
-        // 在 assistant 消息后面补上缺失的 tool results
         for (asst_idx, call_id, fname) in &orphan_calls {
             if *asst_idx == i {
                 output.push(json!({

@@ -1409,13 +1409,14 @@ impl Orchestrator {
             // 移除内部标记字段，不写入 history
             entry.remove("_turn_id");
 
-            // 对与历史冲突的 tool_call id 添加后缀，避免 Anthropic 400
+            // 对与历史冲突的 tool_call id 添加后缀，避免 Anthropic 400。
+            // 使用固定后缀基数确保同一批 assistant + tool result 得到相同后缀。
+            let dedup_suffix = entries.len();
             if let Some(Value::Array(tcs)) = entry.get_mut("tool_calls") {
                 for tc in tcs.iter_mut() {
                     if let Some(Value::String(id)) = tc.get_mut("id") {
                         if !seen_call_ids.insert(id.clone()) {
-                            // id 已存在于历史中，加后缀
-                            let new_id = format!("{}_{:04x}", id, entries.len());
+                            let new_id = format!("{}_{:04x}", id, dedup_suffix);
                             warn!(old_id = %id, new_id = %new_id, "Deduplicating tool_call id on save");
                             *id = new_id.clone();
                             seen_call_ids.insert(new_id);
@@ -1425,7 +1426,7 @@ impl Orchestrator {
             }
             if let Some(Value::String(tcid)) = entry.get_mut("tool_call_id") {
                 if !seen_call_ids.insert(tcid.clone()) {
-                    let new_id = format!("{}_{:04x}", tcid, entries.len());
+                    let new_id = format!("{}_{:04x}", tcid, dedup_suffix);
                     *tcid = new_id.clone();
                     seen_call_ids.insert(new_id);
                 }

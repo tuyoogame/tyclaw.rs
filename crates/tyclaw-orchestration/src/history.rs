@@ -81,6 +81,10 @@ pub(crate) fn trim_history_by_token_budget(
 /// 保障 tool 消息配对关系：
 /// - tool 消息必须能在"紧邻之前的 assistant.tool_calls"里找到对应 id
 /// - 不满足条件的 tool 消息会被丢弃，避免上游 provider（如 Anthropic）400
+///
+/// 注意：`add_tool_result` 处理图片时会在 tool 消息之间插入 user 消息（携带
+/// image blocks），因此 user 消息不应清空 expected_tool_ids，否则同一轮后续
+/// 的 tool result 会被误判为孤立消息而丢弃。
 pub(crate) fn enforce_tool_call_pairing(
     history: &[HashMap<String, Value>],
 ) -> Vec<HashMap<String, Value>> {
@@ -113,7 +117,12 @@ pub(crate) fn enforce_tool_call_pairing(
             continue;
         }
 
-        expected_tool_ids.clear();
+        // user 消息不清空 expected_tool_ids：图片处理会在 tool 消息间
+        // 插入 user 消息，清空会导致后续同一轮的 tool result 被丢弃。
+        // 只有 system 等真正的轮次分隔消息才需要清空。
+        if role != "user" {
+            expected_tool_ids.clear();
+        }
         cleaned.push(msg.clone());
     }
 
