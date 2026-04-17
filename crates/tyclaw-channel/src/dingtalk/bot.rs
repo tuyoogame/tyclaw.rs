@@ -272,40 +272,56 @@ impl ChatbotHandler for DingTalkBot {
                     match self.token_manager.get_token().await {
                         Ok(token) => {
                             for file_path in &response.output_files {
-                                let ext = std::path::Path::new(file_path)
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("file");
+                                let is_image = handler::is_image_file(file_path);
+                                let media_type = if is_image { "image" } else { "file" };
                                 match handler::upload_media(
                                     &self.http_client,
                                     &token,
                                     &self.robot_code,
                                     file_path,
-                                    "file",
+                                    media_type,
                                 )
                                 .await
                                 {
                                     Ok(media_id) => {
-                                        let fname = std::path::Path::new(file_path)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or("file");
-                                        if let Err(e) = handler::reply_file(
-                                            &self.http_client,
-                                            &token,
-                                            &self.robot_code,
-                                            &message,
-                                            &media_id,
-                                            fname,
-                                            ext,
-                                        )
-                                        .await
-                                        {
-                                            error!(file = %file_path, error = %e, "DingTalk: file send failed");
+                                        if is_image {
+                                            if let Err(e) = handler::reply_image(
+                                                &self.http_client,
+                                                &token,
+                                                &self.robot_code,
+                                                &message,
+                                                &media_id,
+                                            )
+                                            .await
+                                            {
+                                                error!(file = %file_path, error = %e, "DingTalk: image send failed");
+                                            }
+                                        } else {
+                                            let fname = std::path::Path::new(file_path)
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or("file");
+                                            let ext = std::path::Path::new(file_path)
+                                                .extension()
+                                                .and_then(|e| e.to_str())
+                                                .unwrap_or("file");
+                                            if let Err(e) = handler::reply_file(
+                                                &self.http_client,
+                                                &token,
+                                                &self.robot_code,
+                                                &message,
+                                                &media_id,
+                                                fname,
+                                                ext,
+                                            )
+                                            .await
+                                            {
+                                                error!(file = %file_path, error = %e, "DingTalk: file send failed");
+                                            }
                                         }
                                     }
                                     Err(e) => {
-                                        error!(file = %file_path, error = %e, "DingTalk: file upload failed")
+                                        error!(file = %file_path, error = %e, "DingTalk: {media_type} upload failed")
                                     }
                                 }
                             }

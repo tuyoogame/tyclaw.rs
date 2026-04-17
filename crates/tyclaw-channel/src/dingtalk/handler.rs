@@ -632,6 +632,69 @@ pub async fn download_file(
     Ok(save_path.to_string_lossy().to_string())
 }
 
+/// 通过钉钉主动消息 API 发送图片（内联展示，非文件卡片）。
+pub async fn reply_image(
+    client: &Client,
+    token: &str,
+    robot_code: &str,
+    message: &ChatbotMessage,
+    media_id: &str,
+) -> Result<(), String> {
+    let msg_param = json!({ "photoURL": media_id }).to_string();
+
+    let (url, payload) = if message.is_private() {
+        (
+            "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+            json!({
+                "robotCode": robot_code,
+                "userIds": [&message.sender_staff_id],
+                "msgKey": "sampleImageMsg",
+                "msgParam": msg_param,
+            }),
+        )
+    } else {
+        (
+            "https://api.dingtalk.com/v1.0/robot/groupMessages/send",
+            json!({
+                "robotCode": robot_code,
+                "openConversationId": &message.conversation_id,
+                "msgKey": "sampleImageMsg",
+                "msgParam": msg_param,
+            }),
+        )
+    };
+
+    let resp = post_json_with_retry(
+        client,
+        url,
+        &[("x-acs-dingtalk-access-token", token)],
+        &payload,
+        10,
+        3,
+        "reply_image",
+    )
+    .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("reply_image failed: {status} {body}"));
+    }
+
+    info!("Image sent successfully via sampleImageMsg");
+    Ok(())
+}
+
+/// 根据文件扩展名判断是否为图片文件。
+pub fn is_image_file(path: &str) -> bool {
+    const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// 根据文件头 magic bytes 检测图片 MIME 类型。
 fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() < 4 {
