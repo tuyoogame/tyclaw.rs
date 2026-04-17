@@ -300,6 +300,10 @@ impl NodeExecutor {
             Some(tyclaw_sandbox::current_sandbox),
         )));
         register_core_tools(&mut tools, &self.app.workspace);
+        // Web 工具：sub agent（尤其是 search 类型）也需要搜索和抓取能力
+        let ws_config = tyclaw_tools::WebSearchConfig::default();
+        tools.register(Box::new(tyclaw_tools::WebSearchTool::new(ws_config)));
+        tools.register(Box::new(tyclaw_tools::WebFetchTool::new(None, None)));
         tools
     }
 

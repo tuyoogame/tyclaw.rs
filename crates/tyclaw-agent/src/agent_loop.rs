@@ -163,6 +163,8 @@ impl AgentRuntime for AgentLoop {
             );
         }
 
+        let mut status = RuntimeStatus::Complete;
+
         loop {
             // 检查是否有运行期间注入的用户消息
             if let Ok(queue) = crate::runtime::INJECTION_QUEUE
@@ -638,6 +640,20 @@ impl AgentRuntime for AgentLoop {
                     }
                 }
 
+                // === ask_user 暂停 ===
+                if let Some((pending_id, question)) = round_outcome.ask_user_pending {
+                    info!(
+                        tool_call_id = %pending_id,
+                        question = %question,
+                        "Agent loop pausing for ask_user"
+                    );
+                    final_content = Some(question);
+                    status = RuntimeStatus::NeedsInput {
+                        pending_tool_call_id: pending_id,
+                    };
+                    break;
+                }
+
                 // === 阶段检测与管理 ===
                 let has_production = tools_used
                     .iter()
@@ -842,7 +858,7 @@ impl AgentRuntime for AgentLoop {
             content: final_content,
             tools_used,
             messages,
-            status: RuntimeStatus::Complete,
+            status,
             tool_events,
             decision_events,
             diagnostics_summary,

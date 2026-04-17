@@ -600,17 +600,22 @@ impl Orchestrator {
             .lock()
             .remove(&workspace_key);
         if let Some((tool_call_id, mut saved_messages)) = pending_entry {
+            // 用户回车没输入内容 → 使用默认行为（让 agent 自行决定）
+            let reply = if user_message.trim().is_empty() {
+                "用户未回复，请根据已有信息自行判断，选择最合理的方案继续执行。".to_string()
+            } else {
+                format!("User replied: {user_message}")
+            };
             info!(
                 tool_call_id = %tool_call_id,
-                user_reply = %user_message,
+                user_reply = %reply,
                 "Resuming agent loop after ask_user"
             );
-            // 将用户回复作为 ask_user 的 tool result 注入
             ContextBuilder::add_tool_result(
                 &mut saved_messages,
                 &tool_call_id,
                 "ask_user",
-                &format!("User replied: {user_message}"),
+                &reply,
             );
 
             let user_role = if self.app.features.enable_rbac {
