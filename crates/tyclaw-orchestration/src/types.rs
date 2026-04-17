@@ -1,7 +1,7 @@
 //! 编排器核心类型与常量。
 
 /// 工具结果最大截断长度。
-pub(crate) const TOOL_RESULT_MAX_CHARS: usize = 500;
+pub(crate) const TOOL_RESULT_MAX_CHARS: usize = 2000;
 /// `/save` 交接文件最多保留的历史消息条数（取最近 N 条）。
 pub(crate) const HANDOFF_MAX_MESSAGES: usize = 120;
 /// `/save` 交接文件中单条消息最大字符数。

@@ -508,11 +508,11 @@ async fn run_outbound_dispatcher(
                             )
                             .await;
                         }
-                        // 同时在 CLI 打印（方便调试）
-                        println!("\n\x1b[2m[DT:{chat_id}]\x1b[0m {}\n", response.text);
+                        // 同时在 CLI 滚动区打印（方便调试）
+                        cli_print(&format!("\x1b[2m[DT:{chat_id}]\x1b[0m \x1b[1;37m{}\x1b[0m", response.text));
                     }
                     OutboundEvent::Error { message, .. } => {
-                        eprintln!("\n\x1b[31m[DT:{chat_id}] Error: {message}\x1b[0m\n");
+                        cli_print(&format!("\x1b[2;31m[DT:{chat_id}] Error: {message}\x1b[0m"));
                     }
                     OutboundEvent::Progress { message, .. } => {
                         // 超长任务文本提醒（仅在超过 30 轮时触发一次）
@@ -530,14 +530,10 @@ async fn run_outbound_dispatcher(
                                 ).await;
                             }
                         }
-                        if message.contains("[sandbox]") || message.contains("[已创建任务") {
-                            println!("\x1b[32m[DT:{chat_id}] {message}\x1b[0m");
-                        } else {
-                            println!("\x1b[2m[DT:{chat_id}] {message}\x1b[0m");
-                        }
+                        cli_print(&format!("\x1b[2m[DT:{chat_id}] {message}\x1b[0m"));
                     }
                     OutboundEvent::Thinking { content, .. } => {
-                        println!("\x1b[2m[DT:{chat_id}] [Thinking] {content}\x1b[0m");
+                        cli_print(&format!("\x1b[2m[DT:{chat_id}] [Thinking] {content}\x1b[0m"));
                     }
                 }
                 continue;

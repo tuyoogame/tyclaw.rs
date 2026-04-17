@@ -323,6 +323,50 @@ impl DagScheduler {
             }
         }
 
+        // 检查是否所有节点都已完成。如果有未完成的节点，说明可能存在循环依赖。
+        {
+            let st = statuses.lock().await;
+            let p = pending.lock().await;
+            let incomplete: Vec<String> = st
+                .iter()
+                .filter(|(_, s)| matches!(s, NodeStatus::Pending | NodeStatus::Running))
+                .map(|(id, _)| id.clone())
+                .collect();
+            if !incomplete.is_empty() {
+                warn!(
+                    nodes = ?incomplete,
+                    "DAG scheduling ended with incomplete nodes — possible circular dependency"
+                );
+                // 将未完成的节点标记为失败
+                drop(st);
+                drop(p);
+                let mut st = statuses.lock().await;
+                let mut rec = records.lock().await;
+                for id in &incomplete {
+                    st.insert(id.clone(), NodeStatus::Failed);
+                    rec.push(ExecutionRecord {
+                        node_id: id.clone(),
+                        model: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        duration_ms: 0,
+                        status: NodeStatus::Failed,
+                        output: None,
+                        error: Some(
+                            "node not completed: possible circular dependency in DAG".into(),
+                        ),
+                        retries: 0,
+                        messages: None,
+                        tools_used: Vec::new(),
+                        tool_events: Vec::new(),
+                        decision_events: Vec::new(),
+                        diagnostics_summary: None,
+                        skills_used: Vec::new(),
+                    });
+                }
+            }
+        }
+
         let result = records.lock().await;
         info!(total_nodes = result.len(), "DAG execution completed");
         result.clone()

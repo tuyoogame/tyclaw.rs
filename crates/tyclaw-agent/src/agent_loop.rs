@@ -114,8 +114,8 @@ impl AgentRuntime for AgentLoop {
         let mut has_plan = false;
         // 最近 exec 命令（归一化后），用于温和重复防抖。
         let mut recent_exec_commands: VecDeque<u64> = VecDeque::new();
-        // Sub-agent 空转检测：产出阶段连续 exec 但没有 write/edit 的计数
-        let mut consecutive_exec_without_write: usize = 0;
+        // Sub-agent 空转检测：产出阶段连续轮次没有 write/edit 的计数
+        let mut consecutive_rounds_without_write: usize = 0;
         let is_sub_agent = self.max_output_chars.is_some();
         // 累计 token 统计
         let mut total_cache_hit: u64 = 0;
@@ -280,17 +280,6 @@ impl AgentRuntime for AgentLoop {
                 write_count,
                 &tools_used,
             );
-
-            // TODO: STATE_VIEW 每轮内容变化会破坏 prompt cache 的前缀匹配，
-            // 暂时禁用以验证缓存增长。后续应改为嵌入 user 消息或固定化。
-            // let snapshot_chars = phase::state_snapshot_limit_chars(total_iterations);
-            // let snapshot = ctx_state.render_prompt_context(snapshot_chars);
-            // if !snapshot.is_empty() {
-            //     compressed.push(chat_message(
-            //         "system",
-            //         &format!("[[TYCLAW_STATE_VIEW]]\n{snapshot}"),
-            //     ));
-            // }
 
             // === Context 快照（可选） ===
             // 仅在显式开启 write_snapshot 时落盘，默认关闭以降低 I/O 和磁盘占用。
@@ -693,21 +682,19 @@ impl AgentRuntime for AgentLoop {
                     let has_write_or_edit = this_round
                         .iter()
                         .any(|t| *t == "write_file" || *t == "edit_file");
-                    let has_exec = this_round.iter().any(|t| *t == "exec");
-
                     if has_write_or_edit {
-                        consecutive_exec_without_write = 0;
-                    } else if has_exec {
-                        consecutive_exec_without_write += 1;
+                        consecutive_rounds_without_write = 0;
+                    } else {
+                        consecutive_rounds_without_write += 1;
                     }
 
-                    if consecutive_exec_without_write >= 3 {
+                    if consecutive_rounds_without_write >= 3 {
                         warn!(
-                            consecutive_exec = consecutive_exec_without_write,
-                            "Sub-agent idle spin: consecutive exec without write/edit — nudging"
+                            consecutive_rounds = consecutive_rounds_without_write,
+                            "Sub-agent idle spin: consecutive rounds without write/edit — nudging"
                         );
                         messages.push(chat_message("system", &crate::nudge_loader::idle_spin()));
-                        consecutive_exec_without_write = 0;
+                        consecutive_rounds_without_write = 0;
                     }
                 }
             } else {

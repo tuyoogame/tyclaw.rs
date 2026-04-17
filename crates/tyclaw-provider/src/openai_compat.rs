@@ -127,7 +127,7 @@ impl OpenAICompatProvider {
     fn commit_cache_plan(&self, plan: CacheCommitPlan) {
         self.cache_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(plan.scope, plan.state);
     }
 
@@ -167,7 +167,7 @@ impl OpenAICompatProvider {
                 let prev_state = self
                     .cache_state
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|e| e.into_inner())
                     .get(scope)
                     .cloned()
                     .unwrap_or_default();
@@ -378,10 +378,14 @@ impl OpenAICompatProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
                 let arguments: HashMap<String, Value> =
-                    json_repair::repair_json(args_str)
-                        .ok()
-                        .and_then(|v| serde_json::from_value(v).ok())
-                        .unwrap_or_default();
+                    match json_repair::repair_json(args_str) {
+                        Ok(v) => serde_json::from_value(v).unwrap_or_default(),
+                        Err(_) => {
+                            let truncated: String = args_str.chars().take(200).collect();
+                            warn!(raw_args = %truncated, "json_repair failed for tool call arguments");
+                            HashMap::new()
+                        }
+                    };
 
                 tool_calls.push(ToolCallRequest {
                     id,
@@ -839,10 +843,14 @@ impl OpenAICompatProvider {
             };
             let args_str = args_parts.join("");
             let arguments: HashMap<String, Value> =
-                json_repair::repair_json(&args_str)
-                    .ok()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
+                match json_repair::repair_json(&args_str) {
+                    Ok(v) => serde_json::from_value(v).unwrap_or_default(),
+                    Err(_) => {
+                        let truncated: String = args_str.chars().take(200).collect();
+                        warn!(raw_args = %truncated, "json_repair failed for SSE tool call arguments");
+                        HashMap::new()
+                    }
+                };
             tool_calls.push(ToolCallRequest {
                 id,
                 name,
@@ -885,15 +893,18 @@ impl OpenAICompatProvider {
         let mut resp = None;
         let mut last_err = String::new();
         for attempt in 1..=3u32 {
-            let send_fut = self
+            let mut req = self
                 .client
                 .post(&endpoint)
                 .header("Authorization", &auth)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send();
+                .header("Content-Type", "application/json");
+            // Anthropic 原生 header 仅在直连时添加（relay 代理不需要）
+            if self.api_base.contains("anthropic.com") {
+                req = req
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01");
+            }
+            let send_fut = req.json(&body).send();
             let send_result = tokio::time::timeout(
                 std::time::Duration::from_secs(NON_STREAM_TIMEOUT_SECS),
                 send_fut,
@@ -988,7 +999,7 @@ impl LLMProvider for OpenAICompatProvider {
     fn cache_breakpoint_idx(&self, scope: &str) -> usize {
         self.cache_state
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(scope)
             .map(|state| state.protected_prefix_len)
             .unwrap_or(0)

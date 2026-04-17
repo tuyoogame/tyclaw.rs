@@ -55,6 +55,12 @@ pub(crate) fn dedupe_history(history: &[HashMap<String, Value>]) -> Vec<HashMap<
 /// 按 token 预算裁剪历史：
 /// 从最近消息向前回溯，尽量保留最新上下文。
 /// 如果第一条就超预算，仍保留一条，避免 history 为空。
+///
+/// 注意：裁剪后可能留下 tool_result 没有对应 tool_call 的孤立消息，
+/// 也可能留下 assistant(tool_calls) 而对应的 tool_result 被裁掉。
+/// 前者由调用方随后执行的 `enforce_tool_call_pairing()` 清理；
+/// 后者（孤立的 tool_calls）由 provider 层的 `ensure_tool_call_pairs`
+/// 添加占位 tool_result 来修复。这是有意为之的分层设计。
 pub(crate) fn trim_history_by_token_budget(
     history: &[HashMap<String, Value>],
     budget_tokens: usize,
@@ -95,7 +101,9 @@ pub(crate) fn enforce_tool_call_pairing(
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
         if role == "assistant" {
-            expected_tool_ids.clear();
+            // 不清空 expected_tool_ids：连续的 assistant 消息（第一条带 tool_calls）
+            // 如果清空，第二条 assistant 会导致第一条的 tool_results 被误丢弃。
+            // 改为 extend：将当前 assistant 的 tool_call IDs 追加到已有集合中。
             if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in tool_calls {
                     if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {

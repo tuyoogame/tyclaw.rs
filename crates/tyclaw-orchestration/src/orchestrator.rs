@@ -457,6 +457,9 @@ impl Orchestrator {
                     // 6. 清理 per-workspace 串行锁
                     orch.injection_queues.lock().remove(&workspace_key);
 
+                    // 6b. 清理 pending_ask_user 避免无限制内存增长
+                    orch.pending_ask_user.lock().remove(&workspace_key);
+
                     // 7. 写审计日志
                     let session_id = "reaper".to_string();
                     let _ = orch.persistence.audit.log(&AuditEntry {
@@ -1229,6 +1232,8 @@ impl Orchestrator {
         // 11. 按需整理记忆
         info!("Step 11 reached, enable_memory={}", self.app.features.enable_memory);
         if self.app.features.enable_memory {
+            // Invalidate cached session so we pick up messages just written by save_turn.
+            self.persistence.sessions.invalidate(&workspace_key);
             let session = self.persistence.sessions.get_or_create_clone(&workspace_key);
             let msg_count = session.messages.len();
             let unconsolidated_count = msg_count - session.last_consolidated;
@@ -1418,7 +1423,10 @@ impl Orchestrator {
 
             // 对与历史冲突的 tool_call id 添加后缀，避免 Anthropic 400。
             // 使用固定后缀基数确保同一批 assistant + tool result 得到相同后缀。
-            let dedup_suffix = entries.len();
+            let dedup_suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as usize % 0xFFFF)
+                .unwrap_or(0);
             if let Some(Value::Array(tcs)) = entry.get_mut("tool_calls") {
                 for tc in tcs.iter_mut() {
                     if let Some(Value::String(id)) = tc.get_mut("id") {

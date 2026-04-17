@@ -345,15 +345,26 @@ pub(crate) fn extract_json_field(json_str: &str, field: &str) -> Option<String> 
     let pattern = format!("\"{}\":\"", field);
     let start = json_str.find(&pattern)?;
     let value_start = start + pattern.len();
-    // 找到未转义的结束引号
+    // 找到未转义的结束引号：需要计算引号前连续反斜杠的数量，
+    // 偶数个反斜杠表示引号未被转义（反斜杠自身被转义），奇数个表示引号被转义。
     let mut i = value_start;
     let bytes = json_str.as_bytes();
     loop {
         if i >= bytes.len() {
             return None;
         }
-        if bytes[i] == b'"' && (i == value_start || bytes[i - 1] != b'\\') {
-            break;
+        if bytes[i] == b'"' {
+            // 计算引号前连续反斜杠的数量
+            let mut num_backslashes = 0;
+            let mut j = i;
+            while j > value_start && bytes[j - 1] == b'\\' {
+                num_backslashes += 1;
+                j -= 1;
+            }
+            // 偶数个反斜杠 → 引号未被转义，是真正的结束引号
+            if num_backslashes % 2 == 0 {
+                break;
+            }
         }
         i += 1;
     }
