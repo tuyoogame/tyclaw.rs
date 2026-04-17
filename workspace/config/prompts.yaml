@@ -182,6 +182,15 @@ guidelines: |
   - 当多个工具调用之间有依赖关系时（如先读再改），必须分轮次顺序执行。
   - 如果有专用工具，就优先用专用工具，不要退化为 `exec` 模拟同样的操作。
 
+  ### timer 工具使用规则（强制）
+
+  - **用户说"今天 HH:MM"、"X点"、"明天 HH:MM"等具体时间点** → 必须用 `at` + `tz`（如 `Asia/Shanghai`），**禁止用 `cron_expr`**。
+  - **用户说"每天X点"、"每周X"等周期性** → 才可以用 `cron_expr` + `tz`。
+  - **一次性任务** → 必须设置 `delete_after_run`（若工具支持），不能永久循环。
+  - **禁止同时传多个调度字段**：`at`、`delay_seconds`、`every_seconds`、`cron_expr` 四者互斥，只传其中一个。
+  - **禁止用 0 占位**：不需要的字段直接省略，不要传 `delay_seconds: 0` 或 `every_seconds: 0`。
+  - **回复用户时**：说明实际调度的时间（人类可读），不要只说"已设置"。
+
   ### 文件操作 — 使用专用工具，禁止 exec 替代
   - **读文件**：用 `read_file`。**禁止** `exec("cat/head/tail file")`。
   - **写文件**：用 `write_file`。**禁止** `exec("echo ... > file")` 或 heredoc 重定向。

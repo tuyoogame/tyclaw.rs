@@ -1,4 +1,4 @@
-//! WebSearchTool —— 搜索引擎工具，支持 Brave API 和 DuckDuckGo 兜底。
+//! WebSearchTool —— 搜索引擎工具，支持 Brave API、阿里云百炼 MCP 和 DuckDuckGo 兜底。
 
 use async_trait::async_trait;
 use regex::Regex;
@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
 
 use super::html::strip_tags;
@@ -14,6 +15,10 @@ use crate::base::{RiskLevel, Tool};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36";
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
+const BAILIAN_MCP_ENDPOINT: &str =
+    "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp";
+
+static BAILIAN_REQ_ID: AtomicU64 = AtomicU64::new(1);
 
 /// WebSearch 配置。
 #[derive(Debug, Clone, Deserialize)]
@@ -109,6 +114,7 @@ impl Tool for WebSearchTool {
         let provider = self.config.provider.trim().to_lowercase();
         match provider.as_str() {
             "duckduckgo" => self.search_duckduckgo(&query, count).await,
+            "bailian" => self.search_bailian(&query, count).await,
             _ => self.search_brave(&query, count).await,
         }
     }
@@ -183,6 +189,85 @@ impl WebSearchTool {
             }
             Err(e) => {
                 warn!("Brave API request error: {e}, falling back to DuckDuckGo");
+                self.search_duckduckgo(query, n).await
+            }
+        }
+    }
+
+    /// 阿里云百炼 WebSearch MCP 搜索。
+    /// 通过 JSON-RPC 2.0 调用百炼 MCP 的 `bailian_web_search` 工具。
+    async fn search_bailian(&self, query: &str, n: usize) -> String {
+        let api_key = if self.config.api_key.is_empty() {
+            env::var("BAILIAN_API_KEY").unwrap_or_default()
+        } else {
+            self.config.api_key.clone()
+        };
+
+        if api_key.is_empty() {
+            warn!("BAILIAN_API_KEY not set, falling back to DuckDuckGo");
+            return self.search_duckduckgo(query, n).await;
+        }
+
+        let req_id = BAILIAN_REQ_ID.fetch_add(1, Ordering::Relaxed);
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "tools/call",
+            "params": {
+                "name": "bailian_web_search",
+                "arguments": {
+                    "query": query,
+                    "count": n
+                }
+            }
+        });
+
+        let result = self
+            .client
+            .post(BAILIAN_MCP_ENDPOINT)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .json(&body)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    warn!("Bailian MCP returned {status}, falling back to DuckDuckGo");
+                    return self.search_duckduckgo(query, n).await;
+                }
+                match resp.json::<Value>().await {
+                    Ok(data) => {
+                        if let Some(text) = data
+                            .get("result")
+                            .and_then(|r| r.get("content"))
+                            .and_then(|c| c.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|item| item.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
+                            text.to_string()
+                        } else if let Some(err) = data.get("error") {
+                            warn!("Bailian MCP error: {err}, falling back to DuckDuckGo");
+                            self.search_duckduckgo(query, n).await
+                        } else {
+                            warn!(
+                                "Bailian MCP unexpected response structure, falling back to DuckDuckGo"
+                            );
+                            self.search_duckduckgo(query, n).await
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Bailian MCP parse error: {e}, falling back to DuckDuckGo");
+                        self.search_duckduckgo(query, n).await
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Bailian MCP request error: {e}, falling back to DuckDuckGo");
                 self.search_duckduckgo(query, n).await
             }
         }
@@ -338,5 +423,100 @@ mod tests {
         let config = WebSearchConfig::default();
         assert_eq!(config.provider, "brave");
         assert_eq!(config.max_results, 5);
+    }
+
+    #[test]
+    fn test_bailian_config() {
+        let json_str = r#"{
+            "provider": "bailian",
+            "api_key": "sk-test123",
+            "max_results": 3
+        }"#;
+        let config: WebSearchConfig = serde_json::from_str(json_str).unwrap();
+        assert_eq!(config.provider, "bailian");
+        assert_eq!(config.api_key, "sk-test123");
+        assert_eq!(config.max_results, 3);
+    }
+
+    #[test]
+    fn test_bailian_mcp_request_body() {
+        let req_id = 42u64;
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "tools/call",
+            "params": {
+                "name": "bailian_web_search",
+                "arguments": {
+                    "query": "rust programming",
+                    "count": 5
+                }
+            }
+        });
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert_eq!(body["method"], "tools/call");
+        assert_eq!(body["params"]["name"], "bailian_web_search");
+        assert_eq!(body["params"]["arguments"]["query"], "rust programming");
+        assert_eq!(body["params"]["arguments"]["count"], 5);
+    }
+
+    #[test]
+    fn test_parse_bailian_mcp_response() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "1. Rust Programming\n   https://rust-lang.org\n   A systems language"
+                    }
+                ]
+            }
+        });
+
+        let text = response
+            .get("result")
+            .and_then(|r| r.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("text"))
+            .and_then(|t| t.as_str());
+
+        assert!(text.is_some());
+        assert!(text.unwrap().contains("Rust Programming"));
+    }
+
+    #[test]
+    fn test_parse_bailian_mcp_error_response() {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32600,
+                "message": "Invalid request"
+            }
+        });
+
+        let has_error = response.get("error").is_some();
+        let has_result = response
+            .get("result")
+            .and_then(|r| r.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("text"))
+            .and_then(|t| t.as_str())
+            .is_some();
+
+        assert!(has_error);
+        assert!(!has_result);
+    }
+
+    #[test]
+    fn test_bailian_req_id_increments() {
+        let id1 = BAILIAN_REQ_ID.load(Ordering::Relaxed);
+        let _ = BAILIAN_REQ_ID.fetch_add(1, Ordering::Relaxed);
+        let id2 = BAILIAN_REQ_ID.load(Ordering::Relaxed);
+        assert_eq!(id2, id1 + 1);
     }
 }

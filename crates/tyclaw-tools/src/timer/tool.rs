@@ -51,17 +51,67 @@ impl TimerTool {
             chat_id
         };
 
-        let delay_seconds = params.get("delay_seconds").and_then(|v| v.as_u64());
-        let every_seconds = params.get("every_seconds").and_then(|v| v.as_u64());
-        let cron_expr = params.get("cron_expr").and_then(|v| v.as_str());
-        let tz = params.get("tz").and_then(|v| v.as_str());
-        let at = params.get("at").and_then(|v| v.as_str());
+        // LLM/tooling often sends delay_seconds/every_seconds as 0 when unused; treat as unset
+        // so `at` + `tz` does not spuriously conflict with tz+delay rules.
+        let delay_seconds = params
+            .get("delay_seconds")
+            .and_then(|v| v.as_u64())
+            .filter(|&n| n > 0);
+        let every_seconds = params
+            .get("every_seconds")
+            .and_then(|v| v.as_u64())
+            .filter(|&n| n > 0);
+        // LLM often sends cron_expr/at as "" when unused; treat empty strings as unset.
+        let cron_expr = params
+            .get("cron_expr")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let tz = params
+            .get("tz")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let at = params
+            .get("at")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
 
-        if tz.is_some() && cron_expr.is_none() {
-            return "Error: tz can only be used with cron_expr".to_string();
+        if tz.is_some() && (delay_seconds.is_some() || every_seconds.is_some()) {
+            return "Error: tz cannot be used with delay_seconds or every_seconds".to_string();
         }
 
-        let (schedule, delete_after) = if let Some(secs) = delay_seconds {
+        // Priority: at > delay_seconds > every_seconds > cron_expr
+        // `at` takes priority so LLM sending both `at` + empty `cron_expr` still works correctly.
+        let (schedule, delete_after) = if let Some(at_str) = at {
+            match chrono::NaiveDateTime::parse_from_str(at_str, "%Y-%m-%dT%H:%M:%S") {
+                Ok(dt) => {
+                    let at_ms = if let Some(tz_name) = tz {
+                        match tz_name.parse::<chrono_tz::Tz>() {
+                            Ok(tz_val) => {
+                                dt.and_local_timezone(tz_val)
+                                    .single()
+                                    .map(|d| d.timestamp_millis())
+                                    .unwrap_or_else(|| dt.and_utc().timestamp_millis())
+                            }
+                            Err(_) => {
+                                return format!("Error: unknown timezone '{}'", tz_name);
+                            }
+                        }
+                    } else {
+                        dt.and_local_timezone(chrono::Local)
+                            .single()
+                            .map(|d| d.timestamp_millis())
+                            .unwrap_or_else(|| dt.and_utc().timestamp_millis())
+                    };
+                    (TimerSchedule::At { at_ms }, true)
+                }
+                Err(_) => {
+                    return format!(
+                        "Error: invalid datetime format '{}'. Expected: YYYY-MM-DDTHH:MM:SS",
+                        at_str
+                    );
+                }
+            }
+        } else if let Some(secs) = delay_seconds {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -87,19 +137,6 @@ impl TimerTool {
                 },
                 false,
             )
-        } else if let Some(at_str) = at {
-            match chrono::NaiveDateTime::parse_from_str(at_str, "%Y-%m-%dT%H:%M:%S") {
-                Ok(dt) => {
-                    let at_ms = dt.and_utc().timestamp_millis();
-                    (TimerSchedule::At { at_ms }, true)
-                }
-                Err(_) => {
-                    return format!(
-                        "Error: invalid datetime format '{}'. Expected: YYYY-MM-DDTHH:MM:SS",
-                        at_str
-                    );
-                }
-            }
         } else {
             return "Error: one of delay_seconds, every_seconds, cron_expr, or at is required"
                 .to_string();
@@ -224,7 +261,14 @@ impl Tool for TimerTool {
     }
 
     fn description(&self) -> &str {
-        "Schedule delayed or recurring tasks. Actions: add, list, remove."
+        "Schedule delayed or recurring tasks. Actions: add, list, remove.\n\
+         SCHEDULING RULES (strictly follow):\n\
+         - One-time at a specific datetime → use `at` (ISO datetime, e.g. '2026-04-17T11:30:00') + optionally `tz`. DO NOT use cron_expr for this case.\n\
+         - One-time after a delay → use `delay_seconds` (must be > 0). Do NOT set tz together.\n\
+         - Recurring on a schedule → use `cron_expr` (e.g. '0 9 * * *') + optionally `tz`.\n\
+         - Repeating every N seconds → use `every_seconds` (must be > 0). Do NOT set tz together.\n\
+         Exactly ONE of [at, delay_seconds, cron_expr, every_seconds] must be provided. Do NOT mix them.\n\
+         Omit fields that are not needed — do not pass 0 as a placeholder."
     }
 
     fn parameters(&self) -> Value {
@@ -240,25 +284,25 @@ impl Tool for TimerTool {
                     "type": "string",
                     "description": "Task instruction (required for add)"
                 },
-                "delay_seconds": {
-                    "type": "integer",
-                    "description": "Execute once after N seconds"
-                },
-                "every_seconds": {
-                    "type": "integer",
-                    "description": "Repeat every N seconds"
-                },
-                "cron_expr": {
+                "at": {
                     "type": "string",
-                    "description": "Cron expression like '0 9 * * *'"
+                    "description": "One-time execution at a specific datetime (ISO 8601, e.g. '2026-04-17T11:30:00'). Use this when the user says 'at HH:MM' or 'today HH:MM' or any specific time point. Interpreted as local timezone unless `tz` is also set. Mutually exclusive with delay_seconds, every_seconds, cron_expr."
                 },
                 "tz": {
                     "type": "string",
-                    "description": "IANA timezone for cron expressions (e.g. 'Asia/Shanghai')"
+                    "description": "IANA timezone for `at` or `cron_expr` (e.g. 'Asia/Shanghai'). Do NOT use with delay_seconds or every_seconds."
                 },
-                "at": {
+                "delay_seconds": {
+                    "type": "integer",
+                    "description": "Execute once after N seconds from now (must be > 0). Do NOT use with tz, cron_expr, or at."
+                },
+                "every_seconds": {
+                    "type": "integer",
+                    "description": "Repeat every N seconds (must be > 0). Do NOT use with tz, cron_expr, or at."
+                },
+                "cron_expr": {
                     "type": "string",
-                    "description": "ISO datetime for one-time execution (e.g. '2026-03-26T10:30:00')"
+                    "description": "Cron expression for recurring tasks (e.g. '0 9 * * *' = every day at 09:00). Use ONLY for recurring schedules, NOT for one-time tasks. Do NOT use when the user asks for a specific one-time time point."
                 },
                 "job_id": {
                     "type": "string",
@@ -403,5 +447,218 @@ mod tests {
             .scope("alice".to_string(), tool.execute(params))
             .await;
         assert!(result.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_at_uses_local_timezone() {
+        let (svc, _rx) = make_svc();
+        let tool = TimerTool::new(svc.clone());
+
+        let mut params = HashMap::new();
+        params.insert("action".to_string(), json!("add"));
+        params.insert("message".to_string(), json!("local tz test"));
+        params.insert("at".to_string(), json!("2030-06-15T19:00:00"));
+        let result = crate::timer::TIMER_CURRENT_USER_ID
+            .scope(
+                "alice".to_string(),
+                crate::timer::TIMER_CURRENT_CHANNEL.scope(
+                    "cli".to_string(),
+                    crate::timer::TIMER_CURRENT_CHAT_ID
+                        .scope("direct".to_string(), tool.execute(params)),
+                ),
+            )
+            .await;
+        assert!(result.starts_with("Created job"));
+
+        let jobs = svc.list_jobs("alice", true).await;
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        if let TimerSchedule::At { at_ms } = &job.schedule {
+            // 用本地时区解析 2030-06-15T19:00:00
+            let expected = chrono::NaiveDateTime::parse_from_str(
+                "2030-06-15T19:00:00",
+                "%Y-%m-%dT%H:%M:%S",
+            )
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+            assert_eq!(*at_ms, expected);
+        } else {
+            panic!("Expected At schedule");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_at_with_explicit_tz() {
+        let (svc, _rx) = make_svc();
+        let tool = TimerTool::new(svc.clone());
+
+        let mut params = HashMap::new();
+        params.insert("action".to_string(), json!("add"));
+        params.insert("message".to_string(), json!("tz test"));
+        params.insert("at".to_string(), json!("2030-06-15T19:00:00"));
+        params.insert("tz".to_string(), json!("Asia/Shanghai"));
+        let result = crate::timer::TIMER_CURRENT_USER_ID
+            .scope(
+                "alice".to_string(),
+                crate::timer::TIMER_CURRENT_CHANNEL.scope(
+                    "cli".to_string(),
+                    crate::timer::TIMER_CURRENT_CHAT_ID
+                        .scope("direct".to_string(), tool.execute(params)),
+                ),
+            )
+            .await;
+        assert!(result.starts_with("Created job"));
+
+        let jobs = svc.list_jobs("alice", true).await;
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        if let TimerSchedule::At { at_ms } = &job.schedule {
+            // Asia/Shanghai = UTC+8, 19:00 CST = 11:00 UTC
+            let expected = chrono::NaiveDateTime::parse_from_str(
+                "2030-06-15T11:00:00",
+                "%Y-%m-%dT%H:%M:%S",
+            )
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+            assert_eq!(*at_ms, expected);
+        } else {
+            panic!("Expected At schedule");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delay_seconds_zero_treated_as_unset() {
+        let (svc, _rx) = make_svc();
+        let tool = TimerTool::new(svc);
+
+        let mut params = HashMap::new();
+        params.insert("action".to_string(), json!("add"));
+        params.insert("message".to_string(), json!("zero delay"));
+        params.insert("delay_seconds".to_string(), json!(0));
+        let result = crate::timer::TIMER_CURRENT_USER_ID
+            .scope(
+                "alice".to_string(),
+                crate::timer::TIMER_CURRENT_CHANNEL.scope(
+                    "cli".to_string(),
+                    crate::timer::TIMER_CURRENT_CHAT_ID
+                        .scope("direct".to_string(), tool.execute(params)),
+                ),
+            )
+            .await;
+        // 0 is ignored like omitted — no schedule source remains
+        assert!(result.contains("one of delay_seconds, every_seconds, cron_expr, or at is required"));
+    }
+
+    #[tokio::test]
+    async fn test_at_with_tz_succeeds_when_delay_and_every_are_zero() {
+        let (svc, _rx) = make_svc();
+        let tool = TimerTool::new(svc);
+
+        let mut params = HashMap::new();
+        params.insert("action".to_string(), json!("add"));
+        params.insert("message".to_string(), json!("hello"));
+        params.insert("at".to_string(), json!("2030-06-15T19:00:00"));
+        params.insert("tz".to_string(), json!("Asia/Shanghai"));
+        params.insert("delay_seconds".to_string(), json!(0));
+        params.insert("every_seconds".to_string(), json!(0));
+        let result = crate::timer::TIMER_CURRENT_USER_ID
+            .scope(
+                "alice".to_string(),
+                crate::timer::TIMER_CURRENT_CHANNEL.scope(
+                    "cli".to_string(),
+                    crate::timer::TIMER_CURRENT_CHAT_ID
+                        .scope("direct".to_string(), tool.execute(params)),
+                ),
+            )
+            .await;
+        assert!(
+            result.starts_with("Created job"),
+            "unexpected: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_at_wins_over_empty_cron_expr() {
+        // LLM sometimes sends at + cron_expr:"" + delay_seconds:0 + every_seconds:0
+        // at should win and succeed.
+        let (svc, _rx) = make_svc();
+        let tool = TimerTool::new(svc);
+
+        let mut params = HashMap::new();
+        params.insert("action".to_string(), json!("add"));
+        params.insert("message".to_string(), json!("greeting"));
+        params.insert("at".to_string(), json!("2030-06-15T11:30:00"));
+        params.insert("tz".to_string(), json!("Asia/Shanghai"));
+        params.insert("cron_expr".to_string(), json!(""));
+        params.insert("delay_seconds".to_string(), json!(0));
+        params.insert("every_seconds".to_string(), json!(0));
+        let result = crate::timer::TIMER_CURRENT_USER_ID
+            .scope(
+                "alice".to_string(),
+                crate::timer::TIMER_CURRENT_CHANNEL.scope(
+                    "cli".to_string(),
+                    crate::timer::TIMER_CURRENT_CHAT_ID
+                        .scope("direct".to_string(), tool.execute(params)),
+                ),
+            )
+            .await;
+        assert!(result.starts_with("Created job"), "unexpected: {result}");
+    }
+
+    #[tokio::test]
+    async fn test_every_seconds_with_empty_tz_succeeds() {
+        let (svc, _rx) = make_svc();
+        let tool = TimerTool::new(svc);
+
+        let mut params = HashMap::new();
+        params.insert("action".to_string(), json!("add"));
+        params.insert("message".to_string(), json!("hello every 3 min"));
+        params.insert("every_seconds".to_string(), json!(180));
+        params.insert("tz".to_string(), json!(""));
+        params.insert("at".to_string(), json!(""));
+        params.insert("cron_expr".to_string(), json!(""));
+        params.insert("delay_seconds".to_string(), json!(0));
+        params.insert("job_id".to_string(), json!(""));
+        let result = crate::timer::TIMER_CURRENT_USER_ID
+            .scope(
+                "alice".to_string(),
+                crate::timer::TIMER_CURRENT_CHANNEL.scope(
+                    "cli".to_string(),
+                    crate::timer::TIMER_CURRENT_CHAT_ID
+                        .scope("direct".to_string(), tool.execute(params)),
+                ),
+            )
+            .await;
+        assert!(
+            result.starts_with("Created job"),
+            "unexpected: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tz_rejected_with_delay() {
+        let (svc, _rx) = make_svc();
+        let tool = TimerTool::new(svc);
+
+        let mut params = HashMap::new();
+        params.insert("action".to_string(), json!("add"));
+        params.insert("message".to_string(), json!("tz with delay"));
+        params.insert("delay_seconds".to_string(), json!(60));
+        params.insert("tz".to_string(), json!("Asia/Shanghai"));
+        let result = crate::timer::TIMER_CURRENT_USER_ID
+            .scope(
+                "alice".to_string(),
+                crate::timer::TIMER_CURRENT_CHANNEL.scope(
+                    "cli".to_string(),
+                    crate::timer::TIMER_CURRENT_CHAT_ID
+                        .scope("direct".to_string(), tool.execute(params)),
+                ),
+            )
+            .await;
+        assert!(result.contains("tz cannot be used with delay_seconds"));
     }
 }

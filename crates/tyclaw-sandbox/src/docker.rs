@@ -669,40 +669,58 @@ impl DockerPool {
         );
 
         let tmpdir_env = format!("TMPDIR={}/work/tmp", self.config.work_dir);
+        let tz_env = format!("TZ={}", detect_host_timezone());
+
+        let mut run_args = vec![
+            "run".to_string(),
+            "-d".into(),
+            "--name".into(),
+            name.clone(),
+            "--restart".into(),
+            "unless-stopped".into(),
+            "--memory".into(),
+            self.config.memory.clone(),
+            "--cpus".into(),
+            self.config.cpus.clone(),
+            "--network".into(),
+            self.config.network.clone(),
+            "--pids-limit".into(),
+            "512".into(),
+            "--shm-size".into(),
+            "256m".into(),
+            "-e".into(),
+            tmpdir_env,
+            "-e".into(),
+            tz_env,
+        ];
+
+        // 挂载主机 /etc/localtime 使容器时区与主机一致（文件存在时才挂载）
+        if Path::new("/etc/localtime").exists() {
+            run_args.extend([
+                "-v".to_string(),
+                "/etc/localtime:/etc/localtime:ro".into(),
+            ]);
+        }
+
+        run_args.extend([
+            "-v".to_string(),
+            mount_arg,
+            "-v".into(),
+            global_skills_mount,
+            "-v".into(),
+            global_tools_mount,
+            "-v".into(),
+            defaults_mount,
+            "-w".into(),
+            self.config.work_dir.clone(),
+            self.config.image.clone(),
+            "sleep".into(),
+            "infinity".into(),
+        ]);
+
+        let run_args_refs: Vec<&str> = run_args.iter().map(|s| s.as_str()).collect();
         let output = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--name",
-                &name,
-                "--restart",
-                "unless-stopped",
-                "--memory",
-                &self.config.memory,
-                "--cpus",
-                &self.config.cpus,
-                "--network",
-                &self.config.network,
-                "--pids-limit",
-                "512",
-                "--shm-size",
-                "256m",
-                "-e",
-                &tmpdir_env,
-                "-v",
-                &mount_arg,
-                "-v",
-                &global_skills_mount,
-                "-v",
-                &global_tools_mount,
-                "-v",
-                &defaults_mount,
-                "-w",
-                &self.config.work_dir,
-                &self.config.image,
-                "sleep",
-                "infinity",
-            ])
+            .args(&run_args_refs)
             .output()
             .await
             .map_err(|e| TyclawError::Other(format!("docker run failed: {e}")))?;
@@ -838,6 +856,27 @@ impl SandboxPool for DockerPool {
 }
 
 fn user_mount_root(_work_dir: &str) -> String {
-    // workspace 根目录始终挂载到 /user，不依赖 workdir 推导
     "/workspace".to_string()
+}
+
+/// 探测主机时区，返回 IANA 时区名（如 "Asia/Shanghai"）。
+fn detect_host_timezone() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        if !tz.is_empty() {
+            return tz;
+        }
+    }
+    if let Ok(tz) = std::fs::read_to_string("/etc/timezone") {
+        let tz = tz.trim();
+        if !tz.is_empty() {
+            return tz.to_string();
+        }
+    }
+    if let Ok(target) = std::fs::read_link("/etc/localtime") {
+        let path = target.to_string_lossy().to_string();
+        if let Some(pos) = path.find("zoneinfo/") {
+            return path[pos + 9..].to_string();
+        }
+    }
+    "UTC".to_string()
 }

@@ -234,10 +234,15 @@ subtasks:
 
 # ============================================================================
 # Web 搜索（可选）
+# provider: brave | duckduckgo | bailian
+#   - brave:    需要 BRAVE_API_KEY 或 api_key 字段
+#   - bailian:  阿里云百炼 WebSearch MCP，需要 BAILIAN_API_KEY 或 api_key 字段 (sk-xxx)
+#   - duckduckgo: 免费兜底，无需 key
+# 当 brave/bailian 的 key 缺失或调用失败时，自动降级至 duckduckgo。
 # ============================================================================
 # web_search:
-#   provider: "brave"
-#   api_key: ""
+#   provider: "bailian"         # brave | duckduckgo | bailian
+#   api_key: ""                 # Brave: BRAVE_API_KEY；百炼: BAILIAN_API_KEY (sk-xxx)
 #   max_results: 5
 
 # ============================================================================
