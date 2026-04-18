@@ -33,10 +33,14 @@
 - **Docker 沙箱隔离** — per-workspace 容器，volume mount 共享文件，资源限制（内存/CPU/进程数），工具操作在容器内安全执行
 - **Prompt Cache** — 系统提示词静态/动态分段 + API 级缓存标记，多轮对话持续命中缓存，显著降低 token 消耗
 - **提示词全外置** — 所有 LLM 提示词集中在 `prompts.yaml`，修改后重启生效，无需重新编译，支持快速 A/B 测试
-- **审计追溯** — 全局按天audit审计日志 + history.jsonl 完整对话记录（含子 agent 的全部工具调用详情）
-- **Session 自动回收** — 空闲超时自动 consolidate 对话到长期记忆、清理临时文件、销毁容器
-- **Skill创建管理** — 支持企业Skill统一管理，用户可灵活自定义Skill，方便企业组织能力沉淀
-- **单二进制部署** — 小巧的单二进制可执行文件部署，还附带钉钉网关和独立agent命令行工具，符合企业业务场景
+- **审计追溯** — 全局按天 audit 审计日志 + history.jsonl 完整对话记录（含子 agent 的全部工具调用详情）
+- **Session 自动回收** — 空闲超时自动 consolidate 对话到长期记忆、清理临时文件、销毁容器；token 超阈值时自动整理记忆并清空历史
+- **Memory 智能过滤** — 注入上下文前按关键词相关性过滤 Memory 段落，减少噪音干扰；当前任务焦点自动追加到 context 末尾
+- **浏览器自动化** — Docker 沙箱内置 Xvfb + Chromium + Playwright，支持非 Headless 浏览器操作（CDP 常驻会话，跨调用保持登录状态）
+- **内置监控面板** — 轻量 HTTP 监控页面（`127.0.0.1:9394`），实时查看活跃任务、Skills、审计日志，自动刷新
+- **ask_user 交互** — Agent 可在执行过程中暂停向用户提问，等待回复后从暂停处恢复；用户空回车则使用默认行为继续
+- **Skill创建管理** — 支持企业 Skill 统一管理，用户可灵活自定义 Skill，方便企业组织能力沉淀
+- **单二进制部署** — 小巧的单二进制可执行文件部署，还附带钉钉网关和独立 agent 命令行工具，符合企业业务场景
 
 ## 核心设计
 
@@ -92,6 +96,7 @@
 Session 是 workspace 的活跃窗口，不是显式对象：
 - 有请求访问 → 创建 session（生成 `s_YYYYMMDD_HHmmss_xxxx` ID）+ 启动 Docker 容器
 - 持续活跃 → 复用容器，追加对话历史
+- 历史膨胀 → token 超过上下文窗口 50% 时自动 consolidate 到 MEMORY.md，清空历史
 - 空闲超时 → 回收：consolidate 对话 → 清理 tmp → 销毁容器
 - 再次访问 → 新 session + 新容器，memory 和技能保留
 
@@ -185,10 +190,11 @@ docker build -t tyclaw-sandbox:latest docker/sandbox/
 
 | 类别 | 内容 |
 |------|------|
-| 系统工具 | ripgrep, ffmpeg, tesseract-ocr (中英文) |
+| 系统工具 | ripgrep, ffmpeg, tesseract-ocr (中英文), Node.js 22, Rust |
 | Python 库 | pandas, numpy, openpyxl, requests, opencv-python-headless, av, pytesseract, faster-whisper, scenedetect |
+| 浏览器 | Xvfb + Chromium + Playwright + playwright-stealth（非 Headless 渲染，反检测） |
 
-容器以 `sleep infinity` 方式运行，作为容器池等待 `docker exec` 调用。
+容器通过 `entrypoint.sh` 启动 Xvfb 虚拟屏幕后 `sleep infinity`，作为容器池等待 `docker exec` 调用。
 
 ### 3. 配置
 
@@ -302,20 +308,23 @@ docker info
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | image | `tyclaw-sandbox:latest` | 沙箱镜像 |
-| memory | `512m` | 内存上限 |
+| memory | `1g` | 内存上限（Chromium 非 Headless 需要较多内存） |
 | cpus | `1` | CPU 核数 |
 | network | `bridge` | 网络模式 |
-| work_dir | `/user/work` | 容器内工作目录 |
-| pids-limit | `128` | 最大进程数 |
+| work_dir | `/workspace` | 容器内工作目录 |
+| pids-limit | `512` | 最大进程数（Chromium 需要较多子进程） |
+| shm-size | `256m` | 共享内存（Chromium IPC 需要） |
 
 ### 挂载关系
 
 ```
-宿主机: works/{bucket}/{workspace_key}/  -->  容器: /user/
+宿主机: works/{bucket}/{workspace_key}/  -->  容器: /workspace/
                                               +-- work/        (工作目录, -w)
                                               +-- skills/      (私有技能)
                                               +-- memory/      (记忆)
                                               +-- cases/       (案例)
+宿主机: workspace/skills/                -->  容器: /workspace/skills/  (只读)
+宿主机: workspace/tools/                 -->  容器: /workspace/tools/   (只读)
 ```
 
 ## 钉钉接入
