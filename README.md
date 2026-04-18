@@ -203,45 +203,47 @@ cp workspace/config/config.example.yaml workspace/config/config.yaml
 # 编辑 config.yaml，填入 API key 和钉钉凭证
 ```
 
-### 4. 使用 start.sh 启动
+### 4. 使用 tyc 脚本
 
-项目提供了 `start.sh` 脚本，封装了常用的启动方式：
+项目提供了 `tyc` 统一管理脚本：
 
 ```bash
-# 直接启动（保留上次运行状态）
-./start.sh
-
-# 清理运行时数据后启动（保留 memory）
-./start.sh --clean
-
-# 重新构建 sandbox Docker 镜像（并回收旧容器）
-./start.sh --build-docker
+# 开发模式启动（cargo run，前台运行）
+./tyc start
 
 # 启动并连接钉钉
-./start.sh --dingtalk
+./tyc start --dingtalk
 
-# 组合使用：先清理再以钉钉模式启动
-./start.sh --clean --dingtalk
+# 清理后启动
+./tyc start --clean --dingtalk
 
-# 重建镜像 + 清理 + 钉钉模式
-./start.sh --build-docker --clean --dingtalk
+# 重建 Docker 镜像后启动
+./tyc start --build-docker --dingtalk
+
+# 生产部署（release 二进制，后台运行）
+./tyc deploy --works-dir /data/works
+
+# 停止后台进程
+./tyc stop
+
+# 查看运行状态
+./tyc status
+
+# 仅清理（不启动）
+./tyc clean
+
+# 仅构建 release 二进制
+./tyc build
+
+# 仅构建 Docker 镜像
+./tyc build-docker
 ```
 
-**参数说明：**
-
-| 参数 | 说明 |
-|------|------|
-| （无参数） | 直接启动，保留上次所有运行时状态 |
-| `--clean` | 启动前清理运行时数据（见下方详细说明） |
-| `--build-docker` | 重新构建 sandbox Docker 镜像并回收旧容器 |
-| `--dingtalk` | 启动后连接钉钉 Stream，进入钉钉 + CLI 混合模式 |
-| 其他参数 | 透传给 `tyclaw-app`（如 `--works-dir /data/works`） |
-
-**`--clean` 清理范围：**
+**`clean` 清理范围：**
 
 | 操作 | 说明 |
 |------|------|
-| 终止 tyclaw 进程 | `killall -9 tyclaw` |
+| 终止 tyclaw 进程 | kill PID + `killall -9 tyclaw` |
 | 清空日志 | `workspace/logs/tyclaw.log` |
 | 清空 workspace 临时数据 | 每个 workspace 下的 `history.jsonl`、`timer_jobs.json`、`skills/`、`cases/`、`work/`（**memory/ 保留**）|
 | 清空审计日志和全局案例 | `workspace/audit/`、`workspace/cases/` |
@@ -250,9 +252,9 @@ cp workspace/config/config.example.yaml workspace/config/config.yaml
 | 清空系统临时文件 | `/tmp/tyclaw_*`、`/tmp/_tyclaw_inline_*` |
 | 复制 demo 数据 | 将 `demo/` 下的示例文件复制到 `cli_user` workspace |
 
-> **注意**：`--clean` 会保留每个 workspace 的 `memory/` 目录（长期记忆），不会丢失积累的上下文。
+> **注意**：`clean` 会保留每个 workspace 的 `memory/` 目录（长期记忆），不会丢失积累的上下文。
 
-### 5. 手动启动（不使用 start.sh）
+### 5. 手动启动（不使用 tyc）
 
 也可以直接通过 cargo 启动：
 
@@ -293,7 +295,7 @@ colima stop
 docker info
 
 # 3. 直接启动，跳过步骤 2 的 Docker 镜像构建
-./start.sh
+./tyc start
 
 # 启动日志中会出现以下警告，说明已进入无沙箱模式：
 # WARN Docker not available — tool commands will run directly on host WITHOUT sandbox isolation
