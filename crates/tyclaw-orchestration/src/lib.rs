@@ -41,6 +41,15 @@ pub(crate) mod history;
 /// 编排器辅助函数（技能路由、案例优化、预算计算）
 pub(crate) mod helpers;
 
+/// Memory 段落相关性过滤
+pub(crate) mod memory_filter;
+
+/// 请求处理器 —— 14 步端到端消息处理流程
+mod handler;
+
+/// Workspace 超时回收后台任务
+pub(crate) mod reaper;
+
 /// 终端输出工具（ANSI 滚动区域内打印）
 pub mod term;
 
