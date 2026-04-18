@@ -256,28 +256,23 @@ cp workspace/config/config.example.yaml workspace/config/config.yaml
 
 ### 5. 手动启动（不使用 tyc）
 
-也可以直接通过 cargo 启动：
-
 ```bash
-# CLI 模式
-cargo run -p tyclaw-app -- --run-dir workspace
-
-# 钉钉 + CLI 混合模式
-cargo run -p tyclaw-app -- --run-dir workspace --dingtalk
-
-# 指定外挂 works 目录（兼容老数据）
-cargo run -p tyclaw-app -- --run-dir workspace --works-dir /data/works
-```
-
-### 6. 全量编译
-
-```bash
+# 编译
 cargo build --release
 
 # 产物
 target/release/tyclaw              # 主程序（CLI + 钉钉）
 target/release/tyclaw-client       # 独立 CLI 客户端
 target/release/dingtalk-gateway    # 钉钉消息网关
+
+# CLI 模式
+./target/release/tyclaw --run-dir workspace
+
+# 钉钉 + CLI 混合模式
+./target/release/tyclaw --run-dir workspace --dingtalk
+
+# 指定外挂 works 目录
+./target/release/tyclaw --run-dir workspace --works-dir /data/works --dingtalk
 ```
 
 ### 无 Docker 模式（本地快速测试）
