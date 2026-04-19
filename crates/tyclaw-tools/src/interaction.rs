@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use crate::base::{RiskLevel, Tool};
+use crate::base::{brief_truncate, RiskLevel, Tool};
 
 /// 向用户提问工具。
 ///
@@ -32,6 +32,11 @@ impl Tool for AskUserTool {
          confirmation, or additional information before proceeding. Do not use this for information \
          you can obtain from available tools, and do not ask for confirmation on routine safe steps. \
          The agent loop will pause and wait for the user's response before continuing."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let question = args.get("question").and_then(|v| v.as_str())?;
+        Some(format!("ask: {}", brief_truncate(question, 60)))
     }
 
     fn parameters(&self) -> Value {

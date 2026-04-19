@@ -13,7 +13,7 @@ use tracing::debug;
 
 use super::html::{html_to_markdown, strip_tags};
 use super::security;
-use crate::base::{RiskLevel, Tool};
+use crate::base::{brief_truncate, RiskLevel, Tool};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36";
 const MAX_REDIRECTS: usize = 5;
@@ -100,6 +100,11 @@ impl Tool for WebFetchTool {
         "Fetch a URL and extract readable content as markdown or plain text. \
          Handles both static and JS-rendered pages (via Jina Reader). \
          Results cached 15 min. Supports articles, docs, news, and dynamic web apps."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let url = args.get("url").and_then(|v| v.as_str())?;
+        Some(format!("fetch: {}", brief_truncate(url, 80)))
     }
 
     fn parameters(&self) -> Value {

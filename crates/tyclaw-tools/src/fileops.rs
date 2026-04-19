@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use tyclaw_tool_abi::{Sandbox, SandboxGlobEntry, SandboxGrepRequest, SandboxGrepResponse};
 
-use crate::base::{RiskLevel, Tool};
+use crate::base::{brief_basename, brief_truncate, RiskLevel, Tool};
 
 // ── 路径解析 ──────────────────────────────────────────────
 
@@ -103,6 +103,16 @@ impl Tool for CopyFileTool {
 
     fn description(&self) -> &str {
         "Copy a file from source to destination. Use this instead of read_file + write_file when you want to preserve the same contents at a new path."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let src = args.get("src").and_then(|v| v.as_str())?;
+        let dst = args.get("dst").and_then(|v| v.as_str())?;
+        Some(format!(
+            "copy: {} → {}",
+            brief_basename(src),
+            brief_basename(dst)
+        ))
     }
 
     fn parameters(&self) -> Value {
@@ -212,6 +222,16 @@ impl Tool for MoveFileTool {
 
     fn description(&self) -> &str {
         "Move or rename a file. Use this instead of copy_file + delete_file when the source should no longer remain at the old path."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let src = args.get("src").and_then(|v| v.as_str())?;
+        let dst = args.get("dst").and_then(|v| v.as_str())?;
+        Some(format!(
+            "move: {} → {}",
+            brief_basename(src),
+            brief_basename(dst)
+        ))
     }
 
     fn parameters(&self) -> Value {
@@ -336,6 +356,11 @@ impl Tool for MkdirTool {
 
     fn description(&self) -> &str {
         "Create a directory (including parent directories). Use this only when a directory must exist before a later step; write_file already creates parent directories automatically."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = args.get("path").and_then(|v| v.as_str())?;
+        Some(format!("mkdir: {path}"))
     }
 
     fn parameters(&self) -> Value {
@@ -557,6 +582,11 @@ impl Tool for GrepSearchTool {
          Use output_mode='files_only' to find which files contain a pattern. \
          Use file_type (e.g. 'rust', 'python', 'js') to filter by language. \
          Prefer this over exec grep; after locating the right file or match, use read_file for deeper inspection."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let pattern = args.get("pattern").and_then(|v| v.as_str())?;
+        Some(format!("grep: {}", brief_truncate(pattern, 60)))
     }
 
     fn parameters(&self) -> Value {
@@ -837,6 +867,14 @@ impl Tool for GlobTool {
         "Fast file pattern matching tool. Supports glob patterns like '**/*.rs', 'src/**/*.py', '*.tsx'. \
          Returns matching file paths sorted by modification time (most recently modified first). \
          Use this to find files by name or path patterns. Prefer this over list_dir when you already know the filename shape."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let pattern = args
+            .get("pattern")
+            .or_else(|| args.get("glob_pattern"))
+            .and_then(|v| v.as_str())?;
+        Some(format!("glob: {}", brief_truncate(pattern, 60)))
     }
 
     fn parameters(&self) -> Value {

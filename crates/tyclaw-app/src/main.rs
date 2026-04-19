@@ -44,6 +44,9 @@ struct DingTalkConfig {
     client_secret: Option<String>,
     /// Gateway WebSocket URL（如 "ws://gateway-host:9100"）。不配则直连钉钉 Stream API。
     gateway_url: Option<String>,
+    /// AI 卡片模板 id（钉钉后台预建好模板后拿到）。
+    /// 未配置时 bot 退化为纯文本回复，不展示思考中动画和工具行。
+    card_template_id: Option<String>,
 }
 
 fn format_effective_config(
@@ -458,6 +461,9 @@ struct DingTalkSender {
     http_client: reqwest::Client,
     token_manager: TokenManager,
     robot_code: String,
+    /// 共享的 AI 卡片注册表，dispatcher 查表找到当前正在响应的卡片，
+    /// 把 Thinking / Tool 事件 feed 进去刷新"思考中"动画和工具行。
+    card_registry: tyclaw_channel::dingtalk::AiCardRegistry,
 }
 
 /// Outbound Dispatcher：消费 outbound 事件，CLI 打印到 stdout，钉钉通过 API 发出。
@@ -475,6 +481,9 @@ async fn run_outbound_dispatcher(
             | OutboundEvent::Thinking {
                 channel, chat_id, ..
             }
+            | OutboundEvent::Tool {
+                channel, chat_id, ..
+            }
             | OutboundEvent::Reply {
                 channel, chat_id, ..
             }
@@ -487,6 +496,36 @@ async fn run_outbound_dispatcher(
         // 钉钉通道的 Reply/Error 通过钉钉 API 发出
         if is_dt {
             if let Some(ref sender) = dt_sender {
+                // 先看当前 chat_id 是否挂着 AI 卡片——挂了就把 Thinking / Tool 事件
+                // feed 进去刷新卡片内容；没挂时各事件走老路径。
+                let card = tyclaw_channel::dingtalk::ai_card::find_card(
+                    &sender.card_registry,
+                    &chat_id,
+                );
+                match &event {
+                    OutboundEvent::Thinking { content, .. } => {
+                        if let Some(c) = &card {
+                            c.feed_thinking(content).await;
+                        }
+                        cli_print(&format!(
+                            "\x1b[2m[DT:{chat_id}] [Thinking] {content}\x1b[0m"
+                        ));
+                        continue;
+                    }
+                    OutboundEvent::Tool { name, brief, .. } => {
+                        let line = if brief.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{name}: {brief}")
+                        };
+                        if let Some(c) = &card {
+                            c.feed_tool(&line).await;
+                        }
+                        cli_print(&format!("\x1b[2m[DT:{chat_id}] ▸ {line}\x1b[0m"));
+                        continue;
+                    }
+                    _ => {}
+                }
                 match &event {
                     OutboundEvent::Reply { response, .. } => {
                         // chat_id 格式：群聊 "conversation_id:staff_id"，私聊 "staff_id"
@@ -532,8 +571,9 @@ async fn run_outbound_dispatcher(
                         }
                         cli_print(&format!("\x1b[2m[DT:{chat_id}] {message}\x1b[0m"));
                     }
-                    OutboundEvent::Thinking { content, .. } => {
-                        cli_print(&format!("\x1b[2m[DT:{chat_id}] [Thinking] {content}\x1b[0m"));
+                    OutboundEvent::Thinking { .. } | OutboundEvent::Tool { .. } => {
+                        // 已在上面的预处理 match 里 continue，不会到达这里；
+                        // 列出分支仅为满足 rustc 穷尽检查。
                     }
                 }
                 continue;
@@ -560,6 +600,14 @@ async fn run_outbound_dispatcher(
             }
             OutboundEvent::Thinking { content, .. } => {
                 cli_print(&format!("\x1b[2m◆ {content}\x1b[0m"));
+            }
+            OutboundEvent::Tool { name, brief, .. } => {
+                let line = if brief.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}: {brief}")
+                };
+                cli_print(&format!("\x1b[2m  ▸ {line}\x1b[0m"));
             }
             OutboundEvent::Reply { response, .. } => {
                 // TyClaw.rs> 亮白色 —— 唯一醒目的输出
@@ -628,6 +676,7 @@ async fn run_hybrid(config: RunConfig, dt_config: DingTalkConfig) {
         client_id,
         client_secret,
         gateway_url,
+        card_template_id,
     } = dt_config;
 
     let client_id = client_id.unwrap_or_else(|| {
@@ -689,25 +738,41 @@ async fn run_hybrid(config: RunConfig, dt_config: DingTalkConfig) {
     spawn_timer_consumer(timer_rx, bus_handle.clone());
     let bus_task = tokio::spawn(bus.run());
 
+    // DingTalk 卡片注册表——DingTalkBot 创建卡片时注册，dispatcher feed 进度时查表。
+    let card_registry = tyclaw_channel::dingtalk::new_card_registry();
+
     // Outbound dispatcher：CLI 打印到 stdout，钉钉通过 API 发出
     let dt_sender = DingTalkSender {
         http_client: reqwest::Client::new(),
         token_manager: token_manager.clone(),
         robot_code: client_id.clone(),
+        card_registry: card_registry.clone(),
     };
     let dispatcher_task = tokio::spawn(run_outbound_dispatcher(outbound_rx, Some(dt_sender)));
 
     // 启动消息接收（后台运行）
     let bot = DingTalkBot::new(
         bus_handle.clone(),
+        Arc::clone(&orchestrator),
         token_manager,
         &client_id,
         workspace_path,
+        card_template_id,
+        card_registry.clone(),
+    );
+
+    // 卡片按钮回调 handler（停止任务）。注册到 CARD_CALLBACK_TOPIC。
+    let card_callback_handler = tyclaw_channel::dingtalk::AiCardCallbackHandler::new(
+        Arc::clone(&orchestrator),
+        card_registry,
     );
 
     if let Some(gw_url) = gateway_url {
         // Gateway 模式：通过 dingtalk-gateway 中转
         let gateway_client = GatewayClient::new(gw_url, bot as Arc<dyn ChatbotHandler>);
+        // TODO: Gateway 协议也要支持多 topic 订阅；当前 GatewayClient 只挂了一个 handler，
+        // 卡片按钮回调在该模式下暂未接入。
+        let _ = card_callback_handler; // 抑制未使用警告
         tokio::spawn(async move {
             info!("Gateway client starting (hybrid mode)...");
             gateway_client.start_forever().await;
@@ -717,6 +782,12 @@ async fn run_hybrid(config: RunConfig, dt_config: DingTalkConfig) {
         let stream_client = DingTalkStreamClient::new(credential);
         stream_client
             .register_handler(ChatbotMessage::TOPIC, bot as Arc<dyn ChatbotHandler>)
+            .await;
+        stream_client
+            .register_handler(
+                tyclaw_channel::dingtalk::CARD_CALLBACK_TOPIC,
+                card_callback_handler as Arc<dyn ChatbotHandler>,
+            )
             .await;
 
         tokio::spawn(async move {

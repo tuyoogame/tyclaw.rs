@@ -11,7 +11,7 @@ use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::html::strip_tags;
-use crate::base::{RiskLevel, Tool};
+use crate::base::{brief_truncate, RiskLevel, Tool};
 
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36";
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
@@ -83,6 +83,11 @@ impl Tool for WebSearchTool {
         "Search the web for real-time information. Returns titles, URLs, and snippets. \
          Use for current events, API docs, technical solutions, or information that may be outdated in training data. \
          Tip: use web_fetch to get full page content from a specific URL."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let query = args.get("query").and_then(|v| v.as_str())?;
+        Some(format!("search: {}", brief_truncate(query, 60)))
     }
 
     fn parameters(&self) -> Value {

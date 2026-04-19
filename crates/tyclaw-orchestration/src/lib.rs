@@ -61,7 +61,7 @@ pub use config::{load_yaml, mask_secret, BaseConfig, LlmConfig, LoggingConfig, W
 pub use orchestrator::Orchestrator;
 pub use session_manager::{Session, SessionManager};
 pub use skill_manager::SkillManager;
-pub use tyclaw_agent::runtime::{parse_thinking_prefix, OnProgress};
+pub use tyclaw_agent::runtime::{parse_thinking_prefix, OnProgress, ProgressEvent};
 pub use tyclaw_control::ControlConfig;
 pub use tyclaw_control::WorkspaceConfig;
 pub use types::{AgentResponse, OrchestratorFeatures, RequestContext};

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tracing::{debug, info, warn, Level};
 
-use tyclaw_agent::runtime::OnProgress;
+use tyclaw_agent::runtime::{OnProgress, ProgressEvent};
 use tyclaw_agent::{RuntimeResult, RuntimeStatus};
 use tyclaw_control::AuditEntry;
 use tyclaw_memory::{extract_case, CaseRetriever};
@@ -675,11 +675,11 @@ impl Orchestrator {
                 Ok(sb) => {
                     info!(sandbox = %sb.id(), user = %ctx.user_id, "Acquired sandbox");
                     if let Some(cb) = ctx.on_progress {
-                        cb(&format!(
+                        cb(ProgressEvent::Status(format!(
                             "[sandbox] 获取容器 {} | 用户 {}",
                             sb.id(),
                             ctx.user_id
-                        ))
+                        )))
                         .await;
                     }
                     Some((sb, user_workspace.clone()))
@@ -695,6 +695,9 @@ impl Orchestrator {
 
         let cache_scope = format!("session:{}", ctx.workspace_key);
         let injection_queue = self.get_injection_queue(&ctx.workspace_key);
+        // 注册 per-workspace 取消令牌，外部（钉钉停止按钮 / 关键字）据此中断。
+        // task_local 下沉到 agent loop，查 `runtime::is_cancel_requested()` 即可。
+        let cancel_token = self.register_cancellation(&ctx.workspace_key);
 
         let run_future = self.runtime.run(
             initial_messages,
@@ -707,6 +710,9 @@ impl Orchestrator {
         let user_role_owned = user_role.to_string();
         let result: RuntimeResult = if let Some((ref sb, _)) = sandbox {
             let sb_clone = sb.clone();
+            tyclaw_agent::runtime::CANCEL_TOKEN
+                .scope(
+                    cancel_token.clone(),
             tyclaw_tools::CURRENT_USER_ROLE
                 .scope(
                     user_role_owned,
@@ -730,9 +736,13 @@ impl Orchestrator {
                             ),
                         ),
                     ),
+                ),
                 )
                 .await?
         } else {
+            tyclaw_agent::runtime::CANCEL_TOKEN
+                .scope(
+                    cancel_token.clone(),
             tyclaw_tools::CURRENT_USER_ROLE
                 .scope(
                     user_role_owned,
@@ -754,15 +764,18 @@ impl Orchestrator {
                             ),
                         ),
                     ),
+                ),
                 )
                 .await?
         };
+        // 任务结束（正常返回、错误、取消）都清理取消令牌。
+        self.clear_cancellation(&ctx.workspace_key, &cancel_token);
 
         // 9.05 release sandbox
         if let (Some((sb, ws)), Some(pool)) = (sandbox, &self.sandbox_pool) {
             info!(sandbox = %sb.id(), "Releasing sandbox");
             if let Some(cb) = ctx.on_progress {
-                cb(&format!("[sandbox] 释放容器 {}", sb.id())).await;
+                cb(ProgressEvent::Status(format!("[sandbox] 释放容器 {}", sb.id()))).await;
             }
             if let Err(e) = pool.release(sb, &ws).await {
                 tracing::warn!(error = %e, "Failed to release sandbox");
@@ -788,9 +801,9 @@ impl Orchestrator {
                 } else {
                     0
                 };
-                cb(&format!(
+                cb(ProgressEvent::Status(format!(
                     "[Token] prompt={prompt} completion={completion} | cache: hit={hit} write={write} ({cache_rate}%)"
-                )).await;
+                ))).await;
             }
         }
 
@@ -884,7 +897,7 @@ impl Orchestrator {
 
             if should_consolidate {
                 if let Some(cb) = ctx.on_progress {
-                    cb(&format!("[整理记忆中... ({unconsolidated_count} 条消息)]")).await;
+                    cb(ProgressEvent::Status(format!("[整理记忆中... ({unconsolidated_count} 条消息)]"))).await;
                 }
 
                 let mem_dir = self.persistence.workspace_mgr.memory_dir(&ctx.workspace_key);
@@ -907,7 +920,7 @@ impl Orchestrator {
                 self.persistence.sessions.invalidate(&ctx.workspace_key);
 
                 if let Some(cb) = ctx.on_progress {
-                    cb("[记忆整理完成，历史已清空]").await;
+                    cb(ProgressEvent::Status("[记忆整理完成，历史已清空]".into())).await;
                 }
                 info!("Step 11: consolidation done, session cleared");
             }

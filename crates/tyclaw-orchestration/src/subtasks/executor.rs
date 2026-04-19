@@ -15,7 +15,8 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use tyclaw_agent::runtime::OnProgress;
-use tyclaw_agent::{parse_thinking_prefix, AgentLoop, AgentRuntime};
+use tyclaw_agent::runtime::ProgressEvent;
+use tyclaw_agent::{AgentLoop, AgentRuntime};
 use tyclaw_prompt::{ContextBuilder, PlannedPromptContext, PromptContextEntry};
 use tyclaw_provider::LLMProvider;
 use tyclaw_tools::ToolRegistry;
@@ -161,20 +162,33 @@ impl NodeExecutor {
             messages.len()
         ));
 
-        // 子 agent 进度回调：缩进 + 青色竖线，与 main 形成视觉层级
-        // [heartbeat] 消息通过 task_local 转发给父 agent 的通道（钉钉等）
+        // 子 agent 进度回调：缩进 + 青色竖线，与 main 形成视觉层级。
+        // Heartbeat 事件通过 task_local 转发给父 agent 的通道（钉钉等）；
+        // 其它事件扁平化成文本打到 sub-agent 的滚动区。
         let node_id_for_cb = node.id.clone();
-        let sub_progress: OnProgress = Box::new(move |msg: &str| {
+        let sub_progress: OnProgress = Box::new(move |event: ProgressEvent| {
             let node_id = node_id_for_cb.clone();
-            let msg = msg.to_string();
             Box::pin(async move {
-                if msg.starts_with("[heartbeat]") {
+                if let ProgressEvent::Heartbeat(msg) = &event {
                     if let Ok(tx) = tyclaw_agent::runtime::HEARTBEAT_TX.try_with(|tx| tx.clone()) {
-                        tx(msg);
+                        tx(msg.clone());
                     }
                     return;
                 }
-                let (_, content) = parse_thinking_prefix(&msg);
+                let content = match event {
+                    ProgressEvent::Thinking(s)
+                    | ProgressEvent::Content(s)
+                    | ProgressEvent::Status(s)
+                    | ProgressEvent::ToolResult(s) => s,
+                    ProgressEvent::ToolStart { name, brief } => {
+                        if brief.is_empty() {
+                            format!("  ▸ {name}")
+                        } else {
+                            format!("  ▸ {name}: {brief}")
+                        }
+                    }
+                    ProgressEvent::Heartbeat(_) => unreachable!(),
+                };
                 for line in content.lines() {
                     crate::term::scroll_print(
                         &format!("\x1b[2m  │ \x1b[36m[{}]\x1b[0m \x1b[2m{}\x1b[0m", node_id, line)
