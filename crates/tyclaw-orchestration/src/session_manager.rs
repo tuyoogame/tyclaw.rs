@@ -366,13 +366,17 @@ impl SessionManager {
             writeln!(file, "{}", serde_json::to_string(&meta)?)?;
         }
 
+        // 先清缓存，使并发读取者在写入完成后从磁盘重新加载（包含新追加的消息）。
+        // 如果放在写入之后，并发读取者可能在写入期间命中旧缓存。
+        {
+            let mut cache = self.cache.lock();
+            cache.remove(workspace_key);
+        }
+
         for msg in messages {
             writeln!(file, "{}", serde_json::to_string(msg)?)?;
         }
 
-        // 清缓存，下次 get_or_create_clone 重新从磁盘加载
-        let mut cache = self.cache.lock();
-        cache.remove(workspace_key);
         Ok(())
     }
 

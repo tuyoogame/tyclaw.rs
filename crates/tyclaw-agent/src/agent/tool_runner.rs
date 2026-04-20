@@ -60,6 +60,8 @@ pub(crate) struct ProcessedToolResult {
 pub(crate) struct ToolRoundOutcome {
     pub per_tool: Vec<ProcessedToolResult>,
     pub progressed: bool,
+    /// ask_user 被调用时，记录 (tool_call_id, question)
+    pub ask_user_pending: Option<(String, String)>,
 }
 
 /// 按 `tool_calls` 顺序串行执行一轮工具，并做输出截断与 exec 指纹入队。
@@ -73,6 +75,7 @@ pub(crate) async fn run_tool_calls_round(
     phase: &str,
 ) -> ToolRoundOutcome {
     let recent_exec_snapshot: Vec<u64> = recent_exec_commands.iter().copied().collect();
+    let mut ask_user_pending: Option<(String, String)> = None;
     let mut exec_cmd_by_tool_id: HashMap<String, u64> = HashMap::new();
     for tc in tool_calls {
         if tc.name == "exec" {
@@ -135,24 +138,14 @@ pub(crate) async fn run_tool_calls_round(
                 .to_string();
             info!(
                 question = %question,
+                tool_id = %tool_id,
                 total_iterations,
-                "ask_user called but disabled, injecting auto-reply"
+                "ask_user: pausing agent loop to wait for user reply"
             );
-            executed.push((
-                tool_id,
-                tool_name,
-                ToolExecutionResult {
-                    output: "用户暂时无法回复。请根据已有信息和用户原始消息中的步骤说明，直接开始产出。不要再调用 ask_user。"
-                        .to_string(),
-                    route: "agent".into(),
-                    status: "auto_reply".into(),
-                    duration_ms: 0,
-                    gate_action: "bypass".into(),
-                    risk_level: "prompt".into(),
-                    sandbox_id: None,
-                },
-            ));
-            continue;
+            // 记录 ask_user 请求，agent_loop 会检测并暂停
+            ask_user_pending = Some((tool_id.clone(), question));
+            // 不执行后续工具——暂停在这里
+            break;
         }
 
         if tool_name == "exec" && explore_exec_hard_blocked {
@@ -332,6 +325,7 @@ pub(crate) async fn run_tool_calls_round(
     ToolRoundOutcome {
         per_tool,
         progressed,
+        ask_user_pending,
     }
 }
 

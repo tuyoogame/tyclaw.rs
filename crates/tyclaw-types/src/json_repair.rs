@@ -3,7 +3,15 @@
 //! LLM 在工具调用时可能生成格式不完整的 JSON，
 //! 常见问题包括：末尾逗号、未闭合的括号、markdown 代码块包裹等。
 
+use regex::Regex;
 use serde_json::Value;
+use std::sync::OnceLock;
+
+/// 全局缓存的末尾逗号正则表达式（编译一次，之后复用）。
+fn trailing_comma_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r",\s*([}\]])").unwrap())
+}
 
 /// 尝试修复畸形 JSON 字符串并解析为 Value。
 ///
@@ -38,8 +46,7 @@ pub fn repair_json(input: &str) -> Result<Value, serde_json::Error> {
     }
 
     // 3. 去除末尾逗号 (在 } 或 ] 之前)
-    let re_trailing_comma = regex::Regex::new(r",\s*([}\]])").unwrap();
-    let cleaned = re_trailing_comma.replace_all(&s, "$1").to_string();
+    let cleaned = trailing_comma_re().replace_all(&s, "$1").to_string();
     if let Ok(v) = serde_json::from_str(&cleaned) {
         return Ok(v);
     }

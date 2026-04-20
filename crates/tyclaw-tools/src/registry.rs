@@ -204,6 +204,10 @@ impl ToolDefinitionProvider for ToolRegistry {
     fn tool_names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
     }
+
+    fn brief(&self, name: &str, args: &ToolParams) -> Option<String> {
+        self.get(name).and_then(|tool| tool.brief(args))
+    }
 }
 
 #[async_trait]

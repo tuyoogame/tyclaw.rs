@@ -13,7 +13,7 @@ use tokio::process::Command;
 
 use tyclaw_tool_abi::Sandbox;
 
-use crate::base::{RiskLevel, Tool};
+use crate::base::{brief_truncate, RiskLevel, Tool};
 
 /// 命令输出的最大字符数。超过此限制的输出会被截断。
 const MAX_OUTPUT_CHARS: usize = 20_000;
@@ -145,6 +145,11 @@ impl Tool for ExecTool {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         compress_exec_output(output, command)
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let cmd = args.get("command").and_then(|v| v.as_str())?;
+        Some(format!("exec: {}", brief_truncate(cmd, 120)))
     }
 
     async fn execute_in_sandbox(

@@ -22,6 +22,19 @@ tokio::task_local! {
     pub static INJECTION_QUEUE: InjectionQueue;
     /// 心跳消息发送器：子任务通过此转发心跳到消息总线。
     pub static HEARTBEAT_TX: HeartbeatSender;
+    /// 取消令牌：外部（钉钉停止按钮 / 关键字 / 命令行中断）可通过它请求终止当前
+    /// 运行中的 agent loop。AgentLoop 在每轮开始前、以及每批工具调用后 check，
+    /// 检测到已取消则短路退出，返回一条"任务已终止"的回复。
+    pub static CANCEL_TOKEN: tokio_util::sync::CancellationToken;
+}
+
+/// 快捷查询：当前 task_local 作用域内的取消令牌是否已触发。
+///
+/// 未设置令牌时（无外部取消通道）返回 `false`。供 AgentLoop 无条件轮询。
+pub fn is_cancel_requested() -> bool {
+    CANCEL_TOKEN
+        .try_with(|t| t.is_cancelled())
+        .unwrap_or(false)
 }
 
 /// Agent 运行时的完成状态。
@@ -114,12 +127,62 @@ pub struct RuntimeResult {
     pub turn_id: String,
 }
 
+/// 进度事件——agent loop / handler 向外部渠道（CLI、钉钉卡片等）汇报的消息载荷。
+///
+/// 原来用 `&str` 走一个通道并在前缀里编码类型（`[Thinking]` / `[heartbeat]` / ...），
+/// 分拣只能靠 string matching。类型化之后下游可以按需分流，比如钉钉 AI 卡片
+/// 只需要 `Thinking` / `ToolStart` 两种就能更新思考行和工具行。
+#[derive(Debug, Clone)]
+pub enum ProgressEvent {
+    /// LLM 推理增量（原 `[Thinking]\n...`）
+    Thinking(String),
+    /// LLM 正文 content 片段（非 reasoning）
+    Content(String),
+    /// 系统状态——轮次、token、sandbox、记忆整理等辅助信息
+    Status(String),
+    /// 长任务心跳提醒（钉钉走 emotion 接口，CLI 直接打印）
+    Heartbeat(String),
+    /// 工具**开始**调用——带上给人看的简短描述，用于卡片工具行
+    ToolStart { name: String, brief: String },
+    /// 工具执行完毕的摘要（原 `  → tool_name (...chars, status, route, ms)`）
+    ToolResult(String),
+}
+
+impl ProgressEvent {
+    /// 兼容旧 CLI 输出：把事件格式化成带前缀的字符串，
+    /// 让 bus 的 OutboundEvent::Progress 保持与改造前一致的显示效果。
+    pub fn legacy_text(&self) -> String {
+        match self {
+            ProgressEvent::Thinking(s) => format!("[Thinking]\n{s}"),
+            ProgressEvent::Content(s) | ProgressEvent::Status(s) | ProgressEvent::ToolResult(s) => {
+                s.clone()
+            }
+            ProgressEvent::Heartbeat(s) => {
+                if s.starts_with("[heartbeat]") {
+                    s.clone()
+                } else {
+                    format!("[heartbeat]{s}")
+                }
+            }
+            ProgressEvent::ToolStart { name, brief } => {
+                if brief.is_empty() {
+                    format!("  ▸ {name}")
+                } else {
+                    format!("  ▸ {name}: {brief}")
+                }
+            }
+        }
+    }
+}
+
 /// 进度回调函数类型。
 ///
 /// 用于在 Agent 执行过程中向外部报告进展。
 /// 返回一个 Pin<Box<Future>>，支持异步回调。
 pub type OnProgress = Box<
-    dyn Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+    dyn Fn(ProgressEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
 >;
 
 /// 构造一条 `{role, content}` 格式的聊天消息。

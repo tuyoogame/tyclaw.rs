@@ -33,10 +33,14 @@
 - **Docker 沙箱隔离** — per-workspace 容器，volume mount 共享文件，资源限制（内存/CPU/进程数），工具操作在容器内安全执行
 - **Prompt Cache** — 系统提示词静态/动态分段 + API 级缓存标记，多轮对话持续命中缓存，显著降低 token 消耗
 - **提示词全外置** — 所有 LLM 提示词集中在 `prompts.yaml`，修改后重启生效，无需重新编译，支持快速 A/B 测试
-- **审计追溯** — 全局按天audit审计日志 + history.jsonl 完整对话记录（含子 agent 的全部工具调用详情）
-- **Session 自动回收** — 空闲超时自动 consolidate 对话到长期记忆、清理临时文件、销毁容器
-- **Skill创建管理** — 支持企业Skill统一管理，用户可灵活自定义Skill，方便企业组织能力沉淀
-- **单二进制部署** — 小巧的单二进制可执行文件部署，还附带钉钉网关和独立agent命令行工具，符合企业业务场景
+- **审计追溯** — 全局按天 audit 审计日志 + history.jsonl 完整对话记录（含子 agent 的全部工具调用详情）
+- **Session 自动回收** — 空闲超时自动 consolidate 对话到长期记忆、清理临时文件、销毁容器；token 超阈值时自动整理记忆并清空历史
+- **Memory 智能过滤** — 注入上下文前按关键词相关性过滤 Memory 段落，减少噪音干扰；当前任务焦点自动追加到 context 末尾
+- **浏览器自动化** — Docker 沙箱内置 Xvfb + Chromium + Playwright，支持非 Headless 浏览器操作（CDP 常驻会话，跨调用保持登录状态）
+- **内置监控面板** — 轻量 HTTP 监控页面（`127.0.0.1:9394`），实时查看活跃任务、Skills、审计日志，自动刷新
+- **ask_user 交互** — Agent 可在执行过程中暂停向用户提问，等待回复后从暂停处恢复；用户空回车则使用默认行为继续
+- **Skill创建管理** — 支持企业 Skill 统一管理，用户可灵活自定义 Skill，方便企业组织能力沉淀
+- **单二进制部署** — 小巧的单二进制可执行文件部署，还附带钉钉网关和独立 agent 命令行工具，符合企业业务场景
 
 ## 核心设计
 
@@ -92,6 +96,7 @@
 Session 是 workspace 的活跃窗口，不是显式对象：
 - 有请求访问 → 创建 session（生成 `s_YYYYMMDD_HHmmss_xxxx` ID）+ 启动 Docker 容器
 - 持续活跃 → 复用容器，追加对话历史
+- 历史膨胀 → token 超过上下文窗口 50% 时自动 consolidate 到 MEMORY.md，清空历史
 - 空闲超时 → 回收：consolidate 对话 → 清理 tmp → 销毁容器
 - 再次访问 → 新 session + 新容器，memory 和技能保留
 
@@ -134,19 +139,19 @@ Session 是 workspace 的活跃窗口，不是显式对象：
               |  +-----------------------+  |
               +-+-------+-------+-------+--+
                 |       |       |       |
-    +-----------+  +----+----+  |  +----+--------+
-    |tyclaw-agent| |tyclaw-  |  |  |tyclaw-prompt |
+    +-----------+  +----+----+  |  +----+----------+
+    |tyclaw-agent| |tyclaw-  |  |  |tyclaw-prompt  |
     | AgentLoop  | |provider |  |  | ContextBuilder|
-    | ReAct 循环 | |LLM 适配 |  |  | prompts.yaml |
-    +------------+ +---------+  |  +--------------+
+    | ReAct 循环 | |LLM 适配 |  |  | prompts.yaml  |
+    +------------+ +---------+  |  +---------------+
                                 |
-                 +--------------+---------------+
-                 |       |       |       |      |
-            +----+--+ +--+---+ ++------+ +-----+----+
-            |tools  | |memory| |control| | sandbox  |
-            |文件/搜索| |案例/记忆| |RBAC/审计| |Docker 隔离|
-            |exec/定时| |consolidator| |限流   | |per-workspace|
-            +-------+ +------+ +------+ +----------+
+                 +-----------+--+-----------+--------------+
+                 |           |              |              |
+            +----+----+   +--+---------+   ++--------+   +-+-----------+
+            |tools    |   |memory      |   |control  |   | sandbox     |
+            |文件/搜索|   |案例/记忆   |   |RBAC/审计|   |Docker 隔离  |
+            |exec/定时|   |consolidator|   |限流     |   |per-workspace|
+            +---------+   +------------+   +---------+   +-------------+
 ```
 
 ### Crate 一览
@@ -185,10 +190,11 @@ docker build -t tyclaw-sandbox:latest docker/sandbox/
 
 | 类别 | 内容 |
 |------|------|
-| 系统工具 | ripgrep, ffmpeg, tesseract-ocr (中英文) |
+| 系统工具 | ripgrep, ffmpeg, tesseract-ocr (中英文), Node.js 22, Rust |
 | Python 库 | pandas, numpy, openpyxl, requests, opencv-python-headless, av, pytesseract, faster-whisper, scenedetect |
+| 浏览器 | Xvfb + Chromium + Playwright + playwright-stealth（非 Headless 渲染，反检测） |
 
-容器以 `sleep infinity` 方式运行，作为容器池等待 `docker exec` 调用。
+容器通过 `entrypoint.sh` 启动 Xvfb 虚拟屏幕后 `sleep infinity`，作为容器池等待 `docker exec` 调用。
 
 ### 3. 配置
 
@@ -197,45 +203,47 @@ cp workspace/config/config.example.yaml workspace/config/config.yaml
 # 编辑 config.yaml，填入 API key 和钉钉凭证
 ```
 
-### 4. 使用 start.sh 启动
+### 4. 使用 tyc 脚本
 
-项目提供了 `start.sh` 脚本，封装了常用的启动方式：
+项目提供了 `tyc` 统一管理脚本：
 
 ```bash
-# 直接启动（保留上次运行状态）
-./start.sh
-
-# 清理运行时数据后启动（保留 memory）
-./start.sh --clean
-
-# 重新构建 sandbox Docker 镜像（并回收旧容器）
-./start.sh --build-docker
+# 开发模式启动（cargo run，前台运行）
+./tyc start
 
 # 启动并连接钉钉
-./start.sh --dingtalk
+./tyc start --dingtalk
 
-# 组合使用：先清理再以钉钉模式启动
-./start.sh --clean --dingtalk
+# 清理后启动
+./tyc start --clean --dingtalk
 
-# 重建镜像 + 清理 + 钉钉模式
-./start.sh --build-docker --clean --dingtalk
+# 重建 Docker 镜像后启动
+./tyc start --build-docker --dingtalk
+
+# 生产部署（release 二进制，后台运行）
+./tyc deploy --works-dir /data/works
+
+# 停止后台进程
+./tyc stop
+
+# 查看运行状态
+./tyc status
+
+# 仅清理（不启动）
+./tyc clean
+
+# 仅构建 release 二进制
+./tyc build
+
+# 仅构建 Docker 镜像
+./tyc build-docker
 ```
 
-**参数说明：**
-
-| 参数 | 说明 |
-|------|------|
-| （无参数） | 直接启动，保留上次所有运行时状态 |
-| `--clean` | 启动前清理运行时数据（见下方详细说明） |
-| `--build-docker` | 重新构建 sandbox Docker 镜像并回收旧容器 |
-| `--dingtalk` | 启动后连接钉钉 Stream，进入钉钉 + CLI 混合模式 |
-| 其他参数 | 透传给 `tyclaw-app`（如 `--works-dir /data/works`） |
-
-**`--clean` 清理范围：**
+**`clean` 清理范围：**
 
 | 操作 | 说明 |
 |------|------|
-| 终止 tyclaw 进程 | `killall -9 tyclaw` |
+| 终止 tyclaw 进程 | kill PID + `killall -9 tyclaw` |
 | 清空日志 | `workspace/logs/tyclaw.log` |
 | 清空 workspace 临时数据 | 每个 workspace 下的 `history.jsonl`、`timer_jobs.json`、`skills/`、`cases/`、`work/`（**memory/ 保留**）|
 | 清空审计日志和全局案例 | `workspace/audit/`、`workspace/cases/` |
@@ -244,32 +252,27 @@ cp workspace/config/config.example.yaml workspace/config/config.yaml
 | 清空系统临时文件 | `/tmp/tyclaw_*`、`/tmp/_tyclaw_inline_*` |
 | 复制 demo 数据 | 将 `demo/` 下的示例文件复制到 `cli_user` workspace |
 
-> **注意**：`--clean` 会保留每个 workspace 的 `memory/` 目录（长期记忆），不会丢失积累的上下文。
+> **注意**：`clean` 会保留每个 workspace 的 `memory/` 目录（长期记忆），不会丢失积累的上下文。
 
-### 5. 手动启动（不使用 start.sh）
-
-也可以直接通过 cargo 启动：
+### 5. 手动启动（不使用 tyc）
 
 ```bash
-# CLI 模式
-cargo run -p tyclaw-app -- --run-dir workspace
-
-# 钉钉 + CLI 混合模式
-cargo run -p tyclaw-app -- --run-dir workspace --dingtalk
-
-# 指定外挂 works 目录（兼容老数据）
-cargo run -p tyclaw-app -- --run-dir workspace --works-dir /data/works
-```
-
-### 6. 全量编译
-
-```bash
+# 编译
 cargo build --release
 
 # 产物
 target/release/tyclaw              # 主程序（CLI + 钉钉）
 target/release/tyclaw-client       # 独立 CLI 客户端
 target/release/dingtalk-gateway    # 钉钉消息网关
+
+# CLI 模式
+./target/release/tyclaw --run-dir workspace
+
+# 钉钉 + CLI 混合模式
+./target/release/tyclaw --run-dir workspace --dingtalk
+
+# 指定外挂 works 目录
+./target/release/tyclaw --run-dir workspace --works-dir /data/works --dingtalk
 ```
 
 ### 无 Docker 模式（本地快速测试）
@@ -287,7 +290,7 @@ colima stop
 docker info
 
 # 3. 直接启动，跳过步骤 2 的 Docker 镜像构建
-./start.sh
+./tyc start
 
 # 启动日志中会出现以下警告，说明已进入无沙箱模式：
 # WARN Docker not available — tool commands will run directly on host WITHOUT sandbox isolation
@@ -302,20 +305,23 @@ docker info
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | image | `tyclaw-sandbox:latest` | 沙箱镜像 |
-| memory | `512m` | 内存上限 |
+| memory | `1g` | 内存上限（Chromium 非 Headless 需要较多内存） |
 | cpus | `1` | CPU 核数 |
 | network | `bridge` | 网络模式 |
-| work_dir | `/user/work` | 容器内工作目录 |
-| pids-limit | `128` | 最大进程数 |
+| work_dir | `/workspace` | 容器内工作目录 |
+| pids-limit | `512` | 最大进程数（Chromium 需要较多子进程） |
+| shm-size | `256m` | 共享内存（Chromium IPC 需要） |
 
 ### 挂载关系
 
 ```
-宿主机: works/{bucket}/{workspace_key}/  -->  容器: /user/
+宿主机: works/{bucket}/{workspace_key}/  -->  容器: /workspace/
                                               +-- work/        (工作目录, -w)
                                               +-- skills/      (私有技能)
                                               +-- memory/      (记忆)
                                               +-- cases/       (案例)
+宿主机: workspace/skills/                -->  容器: /workspace/skills/  (只读)
+宿主机: workspace/tools/                 -->  容器: /workspace/tools/   (只读)
 ```
 
 ## 钉钉接入

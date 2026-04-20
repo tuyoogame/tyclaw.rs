@@ -210,6 +210,14 @@ pub trait ToolDefinitionProvider: Send + Sync {
             .filter_map(|d| d["function"]["name"].as_str().map(String::from))
             .collect()
     }
+
+    /// 给 UI（钉钉卡片、CLI 进度行等）用的工具调用简短描述。
+    ///
+    /// 典型输出：`"exec: npm test"`、`"read: foo.rs"`、`"grep: pattern"`。
+    /// 默认返回 `None`，具体工具或注册表可实现并按参数格式化。
+    fn brief(&self, _name: &str, _args: &ToolParams) -> Option<String> {
+        None
+    }
 }
 
 /// 结构化工具执行结果。
@@ -264,6 +272,10 @@ where
 
     fn tool_names(&self) -> Vec<String> {
         self.as_ref().tool_names()
+    }
+
+    fn brief(&self, name: &str, args: &ToolParams) -> Option<String> {
+        self.as_ref().brief(name, args)
     }
 }
 

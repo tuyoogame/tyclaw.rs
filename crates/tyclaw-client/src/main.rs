@@ -13,8 +13,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 
 use tyclaw_orchestration::{
-    load_yaml, mask_secret, parse_thinking_prefix, BaseConfig, LoggingConfig, OnProgress,
-    Orchestrator,
+    load_yaml, mask_secret, BaseConfig, LoggingConfig, OnProgress, Orchestrator, ProgressEvent,
 };
 use tyclaw_provider::OpenAICompatProvider;
 
@@ -152,14 +151,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 执行单轮对话
     let prompt = args.prompt.join(" ");
-    let progress_cb: OnProgress = Box::new(|msg: &str| {
-        let msg = msg.to_string();
+    let progress_cb: OnProgress = Box::new(|event: ProgressEvent| {
         Box::pin(async move {
-            let (is_thinking, content) = parse_thinking_prefix(&msg);
-            if is_thinking {
-                eprintln!("\x1b[2m[Thinking] {content}\x1b[0m");
-            } else {
-                eprintln!("\x1b[2m{msg}\x1b[0m");
+            match event {
+                ProgressEvent::Thinking(content) => {
+                    eprintln!("\x1b[2m[Thinking] {content}\x1b[0m")
+                }
+                other => eprintln!("\x1b[2m{}\x1b[0m", other.legacy_text()),
             }
         })
     });

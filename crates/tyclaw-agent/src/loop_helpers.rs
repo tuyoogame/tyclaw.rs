@@ -102,8 +102,12 @@ pub(crate) fn extract_inline_script(cmd: &str) -> Option<String> {
 
 /// 连续重复同一批工具调用的最大允许次数。
 /// 超过后直接终止，避免模型"原地踏步"。
+/// 设为 3：容忍偶尔的重试（如网络抖动、文件锁竞争），但阻止无限循环。
+/// 值过小（1-2）会误杀合理重试；过大（5+）则浪费 token 且延迟用户感知。
 pub(crate) const MAX_REPEAT_TOOL_BATCH: usize = 3;
 /// 连续无有效进展轮次上限（仅 DENIED/ERROR 视为无进展）。
+/// 设为 2：允许模型在首次失败后做一次调整尝试，第二次仍失败则终止。
+/// 过于激进（1）会阻止模型自我修正；过于宽松（3+）会在权限问题上空转。
 pub(crate) const MAX_NO_PROGRESS_ROUNDS: usize = 2;
 /// 工具输出最大字符数（产出阶段）。超过此长度的输出会被截断，避免 context 膨胀。
 /// 中间档：兼顾信息量和噪音控制。
@@ -119,6 +123,8 @@ pub(crate) const READ_FILE_TOOL_MAX_CHARS: usize = 96 * 1024;
 pub(crate) const EXPLORE_MAX_RATIO_PERCENT: usize = 30;
 /// 探索阶段绝对上限轮次。无论 max_iterations 多大，探索不超过此值。
 /// 适度放宽探索硬上限，避免复杂输入在早期被过快打断。
+/// 设为 30：经验值，覆盖大多数复杂代码库的探索需求（目录结构、依赖关系、
+/// 关键文件阅读），同时防止无节制浏览导致 context 溢出。
 pub(crate) const EXPLORE_ABSOLUTE_CAP: usize = 30;
 
 /// 工具结果衰减阈值：最近 N 条工具消息保留完整内容。
@@ -156,6 +162,9 @@ pub(crate) const EXEC_HISTORY_WINDOW: usize = 12;
 /// 产出工具名称列表。当这些工具首次出现时，标记探索阶段结束。
 /// dispatch_subtasks 也是产出工具：多模型模式下主控通过它完成文件写入，
 /// 不把它算作产出会导致主控永远停在 explore 阶段。
+///
+/// NOTE: 此列表必须与 ToolRegistry 中注册的工具名称保持同步。
+/// 新增产出型工具时需同步更新此处，否则阶段转换逻辑会失效。
 pub(crate) const PRODUCTION_TOOLS: &[&str] =
     &["write_file", "edit_file", "send_file", "dispatch_subtasks"];
 /// 轮次重置标记：仅当上一轮因 reach max 结束时写入历史。

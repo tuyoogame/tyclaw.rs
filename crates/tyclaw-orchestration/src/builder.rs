@@ -301,6 +301,7 @@ impl OrchestratorBuilder {
             active_tasks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             sandbox_pool: None, // 由 main.rs 启动时注入
             injection_queues: parking_lot::Mutex::new(HashMap::new()),
+            cancellations: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 }

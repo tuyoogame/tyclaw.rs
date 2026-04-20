@@ -31,9 +31,12 @@ use crate::loop_helpers::{
     MAX_REACHED_RESET_MARKER, MAX_REPEAT_TOOL_BATCH, PLAN_CHECK_ITERATIONS,
 };
 use crate::runtime::{
-    chat_message, AgentRuntime, DecisionEvent, OnProgress, RunDiagnosticsSummary, RuntimeResult,
-    RuntimeStatus, ToolExecutionEvent,
+    chat_message, is_cancel_requested, AgentRuntime, DecisionEvent, OnProgress, ProgressEvent,
+    RunDiagnosticsSummary, RuntimeResult, RuntimeStatus, ToolExecutionEvent,
 };
+
+/// 外部请求取消时 agent loop 返回给用户的内容。
+const CANCELLED_REPLY: &str = "⏹ 任务已被手动终止。";
 use tyclaw_prompt::ContextBuilder;
 
 /// ReAct 循环引擎 —— 迭代式 LLM 调用 + 工具执行。
@@ -114,8 +117,8 @@ impl AgentRuntime for AgentLoop {
         let mut has_plan = false;
         // 最近 exec 命令（归一化后），用于温和重复防抖。
         let mut recent_exec_commands: VecDeque<u64> = VecDeque::new();
-        // Sub-agent 空转检测：产出阶段连续 exec 但没有 write/edit 的计数
-        let mut consecutive_exec_without_write: usize = 0;
+        // Sub-agent 空转检测：产出阶段连续轮次没有 write/edit 的计数
+        let mut consecutive_rounds_without_write: usize = 0;
         let is_sub_agent = self.max_output_chars.is_some();
         // 累计 token 统计
         let mut total_cache_hit: u64 = 0;
@@ -162,6 +165,8 @@ impl AgentRuntime for AgentLoop {
                 total_iterations, "Resumed in exploration phase (detected from message history)"
             );
         }
+
+        let mut status = RuntimeStatus::Complete;
 
         loop {
             // 检查是否有运行期间注入的用户消息
@@ -231,15 +236,28 @@ impl AgentRuntime for AgentLoop {
                 "=== Iteration ==="
             );
 
+            // 取消检查（轮次入口）：外部（钉钉停止按钮 / 关键字）请求终止时短路退出。
+            if is_cancel_requested() {
+                info!("Cancel requested at iteration start, terminating agent loop");
+                if let Some(cb) = on_progress {
+                    cb(ProgressEvent::Status("[cancel] 任务已终止".into())).await;
+                }
+                final_content = Some(CANCELLED_REPLY.into());
+                break;
+            }
+
             // CLI 进度：打印当前轮次
             if let Some(cb) = on_progress {
                 // 超长任务提醒：超过 30 轮时发一次文本通知（约 5 分钟+）
                 if total_iterations == 30 {
-                    cb("[heartbeat]🦀 仍在处理中，请耐心等待...").await;
+                    cb(ProgressEvent::Heartbeat(
+                        "[heartbeat]🦀 仍在处理中，请耐心等待...".into(),
+                    ))
+                    .await;
                 }
-                cb(&format!(
+                cb(ProgressEvent::Status(format!(
                     "[轮次 {total_iterations}] 阶段={phase} 第{phase_iter}轮"
-                ))
+                )))
                 .await;
             }
 
@@ -279,17 +297,6 @@ impl AgentRuntime for AgentLoop {
                 &tools_used,
             );
 
-            // TODO: STATE_VIEW 每轮内容变化会破坏 prompt cache 的前缀匹配，
-            // 暂时禁用以验证缓存增长。后续应改为嵌入 user 消息或固定化。
-            // let snapshot_chars = phase::state_snapshot_limit_chars(total_iterations);
-            // let snapshot = ctx_state.render_prompt_context(snapshot_chars);
-            // if !snapshot.is_empty() {
-            //     compressed.push(chat_message(
-            //         "system",
-            //         &format!("[[TYCLAW_STATE_VIEW]]\n{snapshot}"),
-            //     ));
-            // }
-
             // === Context 快照（可选） ===
             // 仅在显式开启 write_snapshot 时落盘，默认关闭以降低 I/O 和磁盘占用。
             // 调试观测产物统一写到 sessions/snap/ 下，与会话历史/附件缓存隔离。
@@ -306,10 +313,10 @@ impl AgentRuntime for AgentLoop {
                     .map(|s| s.len())
                     .unwrap_or(0);
             if let Some(cb) = on_progress {
-                cb(&format!(
+                cb(ProgressEvent::Status(format!(
                     "  ↗ LLM请求: ~{prompt_tokens_est} tokens ({estimator}), {req_chars} chars, messages={}",
                     compressed.len()
-                ))
+                )))
                 .await;
             }
 
@@ -451,11 +458,11 @@ impl AgentRuntime for AgentLoop {
                             }
                         };
                         if !display.is_empty() {
-                            cb(&format!("[Thinking]\n{}", display)).await;
+                            cb(ProgressEvent::Thinking(display)).await;
                         }
                     }
                     if let Some(ref thought) = content_text {
-                        cb(thought).await;
+                        cb(ProgressEvent::Content(thought.clone())).await;
                     }
                 }
 
@@ -528,6 +535,23 @@ impl AgentRuntime for AgentLoop {
                 let explore_exec_hard_blocked =
                     in_exploration && exploration_iterations >= explore_max + 3;
 
+                // 执行前向外广播每个工具的 ToolStart——UI（钉钉卡片、CLI 进度行）
+                // 可据此显示"正在 xxx"。brief 由具体工具实现（read → basename、
+                // exec → 截断的命令、grep → 模式前几十字）。
+                if let Some(cb) = on_progress {
+                    for tc in &response.tool_calls {
+                        let brief = self
+                            .tools
+                            .brief(&tc.name, &tc.arguments)
+                            .unwrap_or_default();
+                        cb(ProgressEvent::ToolStart {
+                            name: tc.name.clone(),
+                            brief,
+                        })
+                        .await;
+                    }
+                }
+
                 let round_outcome = tool_runner::run_tool_calls_round(
                     self.tools.as_ref(),
                     &response.tool_calls,
@@ -538,6 +562,18 @@ impl AgentRuntime for AgentLoop {
                     &phase,
                 )
                 .await;
+
+                // 取消检查（工具批次执行后）：长任务里常见的场景——
+                // 用户在某个工具执行期间点了停止，回到循环时立即退出，
+                // 不再发起下一轮 LLM 调用。
+                if is_cancel_requested() {
+                    info!("Cancel requested after tool batch, terminating agent loop");
+                    if let Some(cb) = on_progress {
+                        cb(ProgressEvent::Status("[cancel] 任务已终止".into())).await;
+                    }
+                    final_content = Some(CANCELLED_REPLY.into());
+                    break;
+                }
 
                 let progressed = round_outcome.progressed;
                 for pr in round_outcome.per_tool {
@@ -565,17 +601,17 @@ impl AgentRuntime for AgentLoop {
                             } else {
                                 cmd
                             };
-                            cb(&format!(
+                            cb(ProgressEvent::ToolResult(format!(
                                 "  → {tool_name}: `{cmd_display}` ({original_len} chars, {}, {}, {}ms)",
                                 pr.status,
                                 pr.route,
                                 pr.duration_ms
-                            )).await;
+                            ))).await;
                         } else {
-                            cb(&format!(
+                            cb(ProgressEvent::ToolResult(format!(
                                 "  → {tool_name} ({original_len} chars, {}, {}, {}ms)",
                                 pr.status, pr.route, pr.duration_ms
-                            ))
+                            )))
                             .await;
                         }
                     }
@@ -638,6 +674,20 @@ impl AgentRuntime for AgentLoop {
                     }
                 }
 
+                // === ask_user 暂停 ===
+                if let Some((pending_id, question)) = round_outcome.ask_user_pending {
+                    info!(
+                        tool_call_id = %pending_id,
+                        question = %question,
+                        "Agent loop pausing for ask_user"
+                    );
+                    final_content = Some(question);
+                    status = RuntimeStatus::NeedsInput {
+                        pending_tool_call_id: pending_id,
+                    };
+                    break;
+                }
+
                 // === 阶段检测与管理 ===
                 let has_production = tools_used
                     .iter()
@@ -658,7 +708,8 @@ impl AgentRuntime for AgentLoop {
                             "Phase transition: explore → produce (production tool detected)"
                         );
                         if let Some(cb) = on_progress {
-                            cb("分析完成，正在生成结果...").await;
+                            cb(ProgressEvent::Content("分析完成，正在生成结果...".into()))
+                                .await;
                         }
                     }
                     for m in after.nudge_messages {
@@ -677,21 +728,19 @@ impl AgentRuntime for AgentLoop {
                     let has_write_or_edit = this_round
                         .iter()
                         .any(|t| *t == "write_file" || *t == "edit_file");
-                    let has_exec = this_round.iter().any(|t| *t == "exec");
-
                     if has_write_or_edit {
-                        consecutive_exec_without_write = 0;
-                    } else if has_exec {
-                        consecutive_exec_without_write += 1;
+                        consecutive_rounds_without_write = 0;
+                    } else {
+                        consecutive_rounds_without_write += 1;
                     }
 
-                    if consecutive_exec_without_write >= 3 {
+                    if consecutive_rounds_without_write >= 3 {
                         warn!(
-                            consecutive_exec = consecutive_exec_without_write,
-                            "Sub-agent idle spin: consecutive exec without write/edit — nudging"
+                            consecutive_rounds = consecutive_rounds_without_write,
+                            "Sub-agent idle spin: consecutive rounds without write/edit — nudging"
                         );
                         messages.push(chat_message("system", &crate::nudge_loader::idle_spin()));
-                        consecutive_exec_without_write = 0;
+                        consecutive_rounds_without_write = 0;
                     }
                 }
             } else {
@@ -710,7 +759,7 @@ impl AgentRuntime for AgentLoop {
                             parsed.display_text.clone()
                         };
                         if !display.is_empty() {
-                            cb(&format!("[Thinking]\n{}", display)).await;
+                            cb(ProgressEvent::Thinking(display)).await;
                         }
                     }
                 }
@@ -842,7 +891,7 @@ impl AgentRuntime for AgentLoop {
             content: final_content,
             tools_used,
             messages,
-            status: RuntimeStatus::Complete,
+            status,
             tool_events,
             decision_events,
             diagnostics_summary,

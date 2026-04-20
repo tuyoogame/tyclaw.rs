@@ -53,6 +53,13 @@ pub enum OutboundEvent {
         chat_id: String,
         content: String,
     },
+    /// 工具**开始**调用。钉钉卡片可据此刷新工具行，CLI 按文本打印。
+    Tool {
+        channel: String,
+        chat_id: String,
+        name: String,
+        brief: String,
+    },
     Reply {
         channel: String,
         chat_id: String,
@@ -199,34 +206,39 @@ impl MessageBus {
         chat_id: &str,
         emotion_context: Option<(String, String)>,
     ) -> OnProgress {
+        use tyclaw_agent::runtime::ProgressEvent;
         let ch = channel.to_string();
         let cid = chat_id.to_string();
-        Box::new(move |text: &str| {
+        Box::new(move |event: ProgressEvent| {
             let tx = outbound_tx.clone();
             let ch = ch.clone();
             let cid = cid.clone();
-            let text = text.to_string();
             let emo = emotion_context.clone();
             Box::pin(async move {
-                let event = if text.starts_with("[Thinking]") {
-                    let stripped = text
-                        .strip_prefix("[Thinking]\n")
-                        .or_else(|| text.strip_prefix("[Thinking]"))
-                        .unwrap_or(&text);
-                    OutboundEvent::Thinking {
+                // 类型化事件 → OutboundEvent。当前 Outbound 只有 Thinking/Progress 两种
+                // 承载进度的变体；Phase 4 卡片渠道会再扩展 ToolStart 等。为了保持 CLI
+                // 显示效果不变，非 Thinking 的事件统一落到 Progress，文本由
+                // `ProgressEvent::legacy_text()` 还原为改造前的带前缀字符串。
+                let outbound = match event {
+                    ProgressEvent::Thinking(content) => OutboundEvent::Thinking {
                         channel: ch,
                         chat_id: cid,
-                        content: stripped.to_string(),
-                    }
-                } else {
-                    OutboundEvent::Progress {
+                        content,
+                    },
+                    ProgressEvent::ToolStart { name, brief } => OutboundEvent::Tool {
                         channel: ch,
                         chat_id: cid,
-                        message: text,
+                        name,
+                        brief,
+                    },
+                    other => OutboundEvent::Progress {
+                        channel: ch,
+                        chat_id: cid,
+                        message: other.legacy_text(),
                         emotion_context: emo,
-                    }
+                    },
                 };
-                let _ = tx.send(event).await;
+                let _ = tx.send(outbound).await;
             })
         })
     }

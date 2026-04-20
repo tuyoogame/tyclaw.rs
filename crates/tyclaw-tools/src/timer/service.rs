@@ -46,7 +46,7 @@ fn compute_next_run(schedule: &TimerSchedule, ref_ms: i64) -> Option<i64> {
             Some(ref_ms + *interval_ms as i64)
         }
         TimerSchedule::Cron { expr, tz } => {
-            use chrono::{TimeZone, Utc};
+            use chrono::{Local, TimeZone};
             use croner::Cron;
 
             let cron = match Cron::new(expr).parse() {
@@ -54,20 +54,27 @@ fn compute_next_run(schedule: &TimerSchedule, ref_ms: i64) -> Option<i64> {
                 Err(_) => return None,
             };
 
-            let base = if let Some(tz_name) = tz {
+            // Cron fields (hour, minute, etc.) must be matched in the target timezone,
+            // not in UTC. Otherwise "11 12 * * *" with tz=Asia/Shanghai would match
+            // 12:11 UTC (= 20:11 CST) instead of 12:11 CST.
+            if let Some(tz_name) = tz {
                 match tz_name.parse::<chrono_tz::Tz>() {
                     Ok(tz_val) => {
                         let dt = tz_val.timestamp_millis_opt(ref_ms).single()?;
-                        dt.with_timezone(&Utc)
+                        let next = cron.find_next_occurrence(&dt, false).ok()?;
+                        Some(next.timestamp_millis())
                     }
-                    Err(_) => Utc.timestamp_millis_opt(ref_ms).single()?,
+                    Err(_) => {
+                        let dt = Local.timestamp_millis_opt(ref_ms).single()?;
+                        let next = cron.find_next_occurrence(&dt, false).ok()?;
+                        Some(next.timestamp_millis())
+                    }
                 }
             } else {
-                Utc.timestamp_millis_opt(ref_ms).single()?
-            };
-
-            let next = cron.find_next_occurrence(&base, false).ok()?;
-            Some(next.timestamp_millis())
+                let dt = Local.timestamp_millis_opt(ref_ms).single()?;
+                let next = cron.find_next_occurrence(&dt, false).ok()?;
+                Some(next.timestamp_millis())
+            }
         }
     }
 }

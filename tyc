@@ -1,0 +1,267 @@
+#!/bin/bash
+# TyClaw.rs 统一管理脚本
+#
+# 用法：
+#   ./tyc start                 开发模式启动（cargo run）
+#   ./tyc start --dingtalk      开发模式 + 钉钉
+#   ./tyc start --clean         清理后启动
+#   ./tyc start --build-docker  重建镜像后启动
+#
+#   ./tyc deploy                生产部署（复制 release 二进制，后台启动）
+#   ./tyc deploy --works-dir /data/works  指定 works 目录
+#
+#   ./tyc stop                  停止后台进程
+#   ./tyc status                查看运行状态
+#   ./tyc clean                 仅清理（不启动）
+#   ./tyc build                 仅构建 release 二进制
+#   ./tyc build-docker          仅构建 Docker 镜像
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+RUN_DIR="$SCRIPT_DIR/workspace"
+BUILD_BINARY="./target/release/tyclaw"
+BINARY="$RUN_DIR/tyclaw"
+PID_FILE="$RUN_DIR/.tyclaw.pid"
+LOG_FILE="$RUN_DIR/logs/tyclaw.log"
+
+# 默认生产部署参数
+DEPLOY_WORKS_DIR=""
+DEPLOY_EXTRA_ARGS=""
+
+# ─── 辅助函数 ──────────────────────────────────────────────────────────
+
+print_usage() {
+    echo "Usage: ./tyc <command> [options]"
+    echo ""
+    echo "Commands:"
+    echo "  start          开发模式启动（cargo run，前台运行）"
+    echo "  deploy         生产部署（release 二进制，后台运行）"
+    echo "  stop           停止后台进程"
+    echo "  status         查看运行状态"
+    echo "  clean          清理运行时数据（保留 memory）"
+    echo "  build          构建 release 二进制"
+    echo "  build-docker   构建 Docker 沙箱镜像"
+    echo ""
+    echo "Options (start):"
+    echo "  --dingtalk       启动钉钉 Stream 连接"
+    echo "  --clean          启动前清理运行时数据"
+    echo "  --build-docker   启动前重建 Docker 镜像"
+    echo ""
+    echo "Options (deploy):"
+    echo "  --works-dir DIR  指定外挂 works 目录"
+    echo "  --dingtalk       启动钉钉（默认启用）"
+}
+
+do_clean() {
+    echo "=== TyClaw Clean ==="
+
+    # 终止进程
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        kill "$PID" 2>/dev/null && echo "[ok] 进程已停止 (pid=$PID)" || true
+        rm -f "$PID_FILE"
+    fi
+    killall -9 tyclaw 2>/dev/null || true
+
+    # 清空日志
+    mkdir -p "$RUN_DIR/logs"
+    > "$LOG_FILE"
+    echo "[ok] 日志已清空"
+
+    # 清空 works 临时数据（保留 memory）
+    if [ -d "$RUN_DIR/works" ]; then
+        for bucket_dir in "$RUN_DIR"/works/*/; do
+            [ -d "$bucket_dir" ] || continue
+            for ws_dir in "$bucket_dir"*/; do
+                [ -d "$ws_dir" ] || continue
+                rm -f "$ws_dir/history.jsonl"
+                rm -f "$ws_dir/timer_jobs.json"
+                rm -rf "$ws_dir/skills/"*
+                rm -rf "$ws_dir/cases/"*
+                rm -rf "$ws_dir/_personal/skills/"*
+                rm -rf "$ws_dir/work/"*
+            done
+        done
+        echo "[ok] works 已清空（memory 已保留）"
+    fi
+
+    # 清空审计日志和案例
+    rm -rf "$RUN_DIR/audit/"* "$RUN_DIR/cases/"*
+    echo "[ok] 审计日志和案例已清空"
+
+    # 清空临时文件
+    rm -rf "$RUN_DIR/tmp/" "$RUN_DIR/dispatches/" "$RUN_DIR"/.dispatch-*
+    rm -f "$RUN_DIR/.active_tasks.json"
+    echo "[ok] 临时文件已清空"
+
+    # 清理 Docker 容器
+    docker ps -a --filter "name=tyclaw-" --format "{{.Names}}" 2>/dev/null | while read name; do
+        docker rm -f "$name" 2>/dev/null
+    done
+    echo "[ok] Docker 容器已清理"
+
+    # 清空系统临时文件
+    rm -rf /tmp/tyclaw_* /tmp/_tyclaw_inline_*
+
+    # 复制 demo 数据到 cli_user
+    workspace_path() {
+        local key="$1"
+        local bucket
+        bucket=$(printf "%s" "$key" | md5 2>/dev/null || printf "%s" "$key" | md5sum | cut -c1-32)
+        echo "$RUN_DIR/works/${bucket:0:2}/$key"
+    }
+    CLI_WS="$(workspace_path "cli_user")"
+    mkdir -p "$CLI_WS/work/attachments"
+    cp demo/*.xlsx demo/*.mp4 demo/*.txt demo/*.md "$CLI_WS/work/attachments/" 2>/dev/null || true
+    echo "[ok] demo 数据已复制到 cli_user"
+
+    echo "=== Clean done ==="
+    echo ""
+}
+
+do_build_docker() {
+    echo "=== Build sandbox Docker image ==="
+    docker build -t tyclaw-sandbox "$SCRIPT_DIR/docker/sandbox"
+    echo "[ok] sandbox 镜像已重建"
+
+    OLD_CONTAINERS=$(docker ps -a --filter "name=tyclaw-" --format "{{.Names}}" 2>/dev/null)
+    if [ -n "$OLD_CONTAINERS" ]; then
+        echo "$OLD_CONTAINERS" | while read name; do
+            docker rm -f "$name" 2>/dev/null
+        done
+        echo "[ok] 旧 sandbox 容器已回收"
+    fi
+    echo ""
+}
+
+do_status() {
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            UPTIME=$(ps -p "$PID" -o etime= 2>/dev/null | tr -d ' ')
+            echo "TyClaw is running (pid=$PID, uptime=$UPTIME)"
+            echo "  PID file: $PID_FILE"
+            echo "  Log file: $LOG_FILE"
+            echo "  Monitor:  http://127.0.0.1:9394"
+            return 0
+        else
+            echo "TyClaw is not running (stale pid=$PID)"
+            return 1
+        fi
+    else
+        echo "TyClaw is not running (no PID file)"
+        return 1
+    fi
+}
+
+# ─── 命令分发 ──────────────────────────────────────────────────────────
+
+COMMAND="${1:-}"
+shift 2>/dev/null || true
+
+case "$COMMAND" in
+    start)
+        # 开发模式：cargo run，前台运行
+        CLEAN=false
+        BUILD=false
+        EXTRA_ARGS=""
+        for arg in "$@"; do
+            case "$arg" in
+                --clean) CLEAN=true ;;
+                --build-docker) BUILD=true ;;
+                *) EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
+            esac
+        done
+        [ "$CLEAN" = true ] && do_clean
+        [ "$BUILD" = true ] && do_build_docker
+        echo "Starting TyClaw.rs (dev mode) ..."
+        cargo run -p tyclaw-app -- --run-dir "$RUN_DIR" $EXTRA_ARGS
+        ;;
+
+    deploy)
+        # 生产部署：release 二进制，后台运行
+        EXTRA_ARGS="--dingtalk"
+        for arg in "$@"; do
+            case "$arg" in
+                --works-dir) shift; DEPLOY_WORKS_DIR="$1" ;;
+                --works-dir=*) DEPLOY_WORKS_DIR="${arg#*=}" ;;
+                *) EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
+            esac
+        done
+
+        if [ ! -x "$BUILD_BINARY" ]; then
+            echo "Error: Release binary not found at $BUILD_BINARY"
+            echo "Run './tyc build' first."
+            exit 1
+        fi
+
+        if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+            echo "TyClaw is already running (pid=$(cat "$PID_FILE")). Stop first: ./tyc stop"
+            exit 1
+        fi
+
+        cp "$BUILD_BINARY" "$BINARY"
+        echo "Copied binary to $BINARY"
+
+        mkdir -p "$RUN_DIR/logs"
+
+        WORKS_ARGS=""
+        if [ -n "$DEPLOY_WORKS_DIR" ]; then
+            WORKS_ARGS="--works-dir $DEPLOY_WORKS_DIR"
+        fi
+
+        echo "[$(date)] Starting TyClaw (deploy)..." >> "$LOG_FILE"
+        nohup "$BINARY" \
+            --run-dir "$RUN_DIR" \
+            $WORKS_ARGS \
+            $EXTRA_ARGS \
+            >> "$LOG_FILE" 2>&1 &
+
+        echo $! > "$PID_FILE"
+        echo "TyClaw deployed (pid=$(cat "$PID_FILE"))"
+        echo "  Log:     $LOG_FILE"
+        echo "  Monitor: http://127.0.0.1:9394"
+        ;;
+
+    stop)
+        if [ ! -f "$PID_FILE" ]; then
+            echo "No PID file found, TyClaw is not running"
+            exit 0
+        fi
+        PID=$(cat "$PID_FILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            kill "$PID"
+            echo "Stopped TyClaw (pid=$PID)"
+        else
+            echo "Not running (stale pid=$PID)"
+        fi
+        rm -f "$PID_FILE"
+        ;;
+
+    status)
+        do_status
+        ;;
+
+    clean)
+        do_clean
+        ;;
+
+    build)
+        echo "Building release binary ..."
+        cargo build --release -p tyclaw-app
+        ls -lh "$BUILD_BINARY"
+        echo "Done."
+        ;;
+
+    build-docker)
+        do_build_docker
+        ;;
+
+    *)
+        print_usage
+        exit 1
+        ;;
+esac

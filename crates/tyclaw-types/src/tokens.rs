@@ -55,11 +55,7 @@ pub fn estimate_prompt_tokens(
         return 0;
     }
 
-    match tiktoken_rs::cl100k_base() {
-        Ok(bpe) => bpe.encode_with_special_tokens(&payload).len(),
-        // fallback: 按字符数估算，对 CJK 更准（1 char ≈ 1 token）
-        Err(_) => payload.chars().count().max(1),
-    }
+    bpe().encode_with_special_tokens(&payload).len()
 }
 
 /// 估算单条消息贡献的 token 数量。
