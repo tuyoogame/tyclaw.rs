@@ -212,21 +212,16 @@ impl ChatbotHandler for DingTalkBot {
             ai_card::register_card(&self.card_registry, &chat_id, Arc::clone(c));
         }
 
-        // 只在没有卡片的降级路径上贴"收到..."表情气泡——卡片的"思考中"动画
-        // 已经充当了同样的"我在干活"提示。
-        let emotion_attached = if card.is_none() {
-            if let Ok(token) = self.token_manager.get_token().await {
-                handler::emotion_reply(
-                    &self.http_client,
-                    &token,
-                    &self.robot_code,
-                    &message,
-                    "🦀收到...",
-                )
-                .await
-            } else {
-                false
-            }
+        // 表情气泡和卡片可以共存：表情贴在用户原消息上，卡片是新消息。
+        let emotion_attached = if let Ok(token) = self.token_manager.get_token().await {
+            handler::emotion_reply(
+                &self.http_client,
+                &token,
+                &self.robot_code,
+                &message,
+                "🦀收到...",
+            )
+            .await
         } else {
             false
         };
@@ -346,11 +341,18 @@ impl ChatbotHandler for DingTalkBot {
                 };
                 let formatted = format!("{header}\n\n{reply_text}\n\n{footer}");
 
+                // 有卡片时写入最终态；如果卡片 finalize 失败，fallback 到纯文本。
+                // 卡片场景：不需要 header（问题已在"输出中"阶段展示过），只要正文+footer。
+                let card_content = format!("{reply_text}\n\n{footer}");
+                let mut need_text_fallback = card.is_none();
                 if let Some(ref c) = card {
-                    // 有卡片：写入最终态，不再发新消息。注销 registry 防止后续事件误投。
                     ai_card::unregister_card(&self.card_registry, &chat_id);
-                    c.finalize(&formatted).await;
-                } else {
+                    if let Err(e) = c.finalize(&card_content).await {
+                        warn!(error = %e, "AI card finalize failed, falling back to text reply");
+                        need_text_fallback = true;
+                    }
+                }
+                if need_text_fallback {
                     let sent = handler::reply_markdown(
                         &self.http_client,
                         "执行结果",

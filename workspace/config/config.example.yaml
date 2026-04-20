@@ -175,6 +175,21 @@ workspace:
 # dingtalk:
 #   client_id: "YOUR_DINGTALK_APP_KEY"
 #   client_secret: "YOUR_DINGTALK_APP_SECRET"
+#
+#   # AI 卡片模板 id（钉钉开放平台 → 互动卡片 → 模板管理 → 创建/选择模板）。
+#   # 模板需包含变量：content（AI 流式富文本）、flowStatus（状态控制）、result（最终结果富文本）。
+#   # 未配置时 bot 退化为纯文本回复，不展示思考中动画和工具行。
+#   # card_template_id: "YOUR_CARD_TEMPLATE_ID"
+#
+#   # Gateway 模式（可选）：通过 dingtalk-gateway 中转，不配则直连钉钉 Stream API。
+#   # gateway_url: "ws://gateway-host:9100"
+#
+#   # Workspace 路由：按会话 ID 路由到不同的 workspace。
+#   # 不配则所有会话使用 workspace.key_strategy 的默认策略。
+#   # workspace_id: "default"
+#   # routes:
+#   #   "conversation_id_1": "workspace.code"
+#   #   "conversation_id_2": "workspace.data"
 
 # ============================================================================
 # 子任务引擎 —— 多模型并行
