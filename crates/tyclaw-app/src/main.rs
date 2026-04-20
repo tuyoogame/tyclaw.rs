@@ -741,6 +741,21 @@ async fn run_hybrid(config: RunConfig, dt_config: DingTalkConfig) {
     // DingTalk 卡片注册表——DingTalkBot 创建卡片时注册，dispatcher feed 进度时查表。
     let card_registry = tyclaw_channel::dingtalk::new_card_registry();
 
+    // 定期清理超时未 finalize 的卡片，防止异常退出导致 registry 泄漏。
+    {
+        let registry = card_registry.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+            loop {
+                interval.tick().await;
+                let reaped = tyclaw_channel::dingtalk::reap_stale_cards(&registry).await;
+                if reaped > 0 {
+                    info!(reaped, "Stale AI cards cleaned up");
+                }
+            }
+        });
+    }
+
     // Outbound dispatcher：CLI 打印到 stdout，钉钉通过 API 发出
     let dt_sender = DingTalkSender {
         http_client: reqwest::Client::new(),

@@ -769,7 +769,7 @@ impl Orchestrator {
                 .await?
         };
         // 任务结束（正常返回、错误、取消）都清理取消令牌。
-        self.clear_cancellation(&ctx.workspace_key, &cancel_token);
+        self.clear_cancellation(&ctx.workspace_key);
 
         // 9.05 release sandbox
         if let (Some((sb, ws)), Some(pool)) = (sandbox, &self.sandbox_pool) {

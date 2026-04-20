@@ -16,7 +16,8 @@ pub mod message;
 pub mod stream;
 
 pub use ai_card::{
-    new_card_registry, AiCardCallbackHandler, AiCardRegistry, CardReplier, CARD_CALLBACK_TOPIC,
+    new_card_registry, reap_stale_cards, AiCardCallbackHandler, AiCardRegistry, CardReplier,
+    CARD_CALLBACK_TOPIC,
 };
 pub use bot::DingTalkBot;
 pub use credential::{Credential, TokenManager};

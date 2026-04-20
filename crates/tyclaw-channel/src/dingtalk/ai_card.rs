@@ -42,9 +42,15 @@ const API_UPDATE: &str = "https://api.dingtalk.com/v1.0/card/instances";
 
 /// 卡片模板变量 key（需与钉钉后台模板一致）。
 const CONTENT_KEY: &str = "content";
+const RESULT_KEY: &str = "result";
+const PROGRESS_KEY: &str = "progress";
+/// flowStatus 是钉钉 AI 卡片组件的内置状态字段，控制"输出中"/"完成"状态切换。
 const FLOW_STATUS_KEY: &str = "flowStatus";
-const STATUS_PROCESSING: &str = "1";
-const STATUS_FINISHED: &str = "3";
+/// flowStatus: 1=处理中，3=完成（与 Python 版一致）
+const FLOW_STATUS_PROCESSING: &str = "1";
+const FLOW_STATUS_FINISHED: &str = "3";
+const PROGRESS_PROCESSING: &str = "0";
+const PROGRESS_FINISHED: &str = "100";
 
 /// 占位空内容——钉钉卡片空字符串会报错，用零宽空格兜底。
 const EMPTY_PLACEHOLDER: &str = "\u{200B}";
@@ -59,6 +65,9 @@ struct CardState {
     /// 是否已终结——终结后所有 feed 调用都应是 no-op。
     finalized: bool,
 }
+
+/// 卡片超时时间——超过此时长未 finalize 的卡片视为泄漏，reap 时自动清理。
+const CARD_TTL_SECS: u64 = 30 * 60; // 30 分钟
 
 /// 单张 AI 卡片的生命周期封装。
 pub struct CardReplier {
@@ -75,6 +84,8 @@ pub struct CardReplier {
     header: String,
     /// 任务发起者 staff_id——停止按钮回调时用于 owner 校验。
     pub owner_staff_id: String,
+    /// 创建时间——用于 reap 超时卡片。
+    created_at: std::time::Instant,
     state: PMutex<CardState>,
 }
 
@@ -107,26 +118,23 @@ impl CardReplier {
         let initial_content = format!("{header}🔍 思考中");
 
         // 1) 创建卡片实例。
+        // 必须声明 imRobotOpenSpaceModel / imGroupOpenSpaceModel，
+        // 否则 deliver 时钉钉会报 "spaces of card is empty"。
         let create_body = json!({
             "cardTemplateId": template_id,
             "outTrackId": out_track_id,
             "callbackType": "STREAM",
             "cardData": {
                 "cardParamMap": {
-                    CONTENT_KEY: initial_content,
-                    FLOW_STATUS_KEY: STATUS_PROCESSING,
+                    CONTENT_KEY: EMPTY_PLACEHOLDER,
+                    FLOW_STATUS_KEY: FLOW_STATUS_PROCESSING,
                 }
             },
-            "privateData": {
-                sender_staff_id: {
-                    "cardParamMap": {
-                        CONTENT_KEY: initial_content,
-                        FLOW_STATUS_KEY: STATUS_PROCESSING,
-                    }
-                }
-            },
+            "imGroupOpenSpaceModel": { "supportForward": true },
+            "imRobotOpenSpaceModel": { "supportForward": true },
             "userIdType": 1
         });
+        debug!(track_id = %out_track_id, payload = %create_body, "AI card create request");
         let resp = http
             .post(API_CREATE)
             .header("x-acs-dingtalk-access-token", &token)
@@ -140,26 +148,33 @@ impl CardReplier {
         if !status.is_success() {
             return Err(format!("create card HTTP {status}: {body}"));
         }
-        debug!(track_id = %out_track_id, "AI card created");
+        debug!(track_id = %out_track_id, response = %body, "AI card created");
 
-        // 2) 投递到会话（私聊 vs 群聊用不同的 openSpaceId 前缀）。
-        let open_space_id = if is_private {
-            format!("dtv1.card//IM_ROBOT.{sender_staff_id}")
-        } else {
-            format!("dtv1.card//IM_GROUP.{conversation_id}")
-        };
-        let deliver_body = json!({
+        // 2) 投递到会话（私聊 vs 群聊）。
+        // 参照钉钉官方 Python SDK (dingtalk-stream-sdk-python/card_replier.py)：
+        //
+        // 私聊：openSpaceId = "dtv1.card//IM_ROBOT.{sender_staff_id}"
+        //        imRobotOpenDeliverModel = { "spaceType": "IM_ROBOT" }
+        //
+        // 群聊：openSpaceId = "dtv1.card//IM_GROUP.{conversation_id}"
+        //        imGroupOpenDeliverModel = { "robotCode": robotCode }
+        let mut deliver_body = json!({
             "outTrackId": out_track_id,
-            "robotCode": robot_code,
-            "openSpaceId": open_space_id,
-            "openSpaceDeliverModel": {
-                "searchSupport": { "searchIcon": "", "searchTypeName": "" },
-                "notification": {
-                    "alertContent": "AI Assistant",
-                    "notificationOff": false,
-                }
-            }
+            "userIdType": 1,
         });
+        if is_private {
+            deliver_body["openSpaceId"] = json!(format!("dtv1.card//IM_ROBOT.{sender_staff_id}"));
+            deliver_body["imRobotOpenDeliverModel"] = json!({
+                "spaceType": "IM_ROBOT",
+                "robotCode": robot_code,
+            });
+        } else {
+            deliver_body["openSpaceId"] = json!(format!("dtv1.card//IM_GROUP.{conversation_id}"));
+            deliver_body["imGroupOpenDeliverModel"] = json!({
+                "robotCode": robot_code,
+            });
+        }
+        debug!(track_id = %out_track_id, payload = %deliver_body, "AI card deliver request");
         let resp = http
             .post(API_DELIVER)
             .header("x-acs-dingtalk-access-token", &token)
@@ -173,9 +188,13 @@ impl CardReplier {
         if !status.is_success() {
             return Err(format!("deliver card HTTP {status}: {body}"));
         }
-        debug!(track_id = %out_track_id, "AI card delivered");
+        // 钉钉 deliver 可能 HTTP 200 但 result 里 success=false，需要检查
+        if body.contains("\"success\":false") {
+            return Err(format!("deliver card rejected: {body}"));
+        }
+        debug!(track_id = %out_track_id, response = %body, "AI card delivered");
 
-        Ok(Arc::new(Self {
+        let card = Arc::new(Self {
             http,
             token_manager,
             robot_code,
@@ -183,8 +202,14 @@ impl CardReplier {
             out_track_id,
             header,
             owner_staff_id: sender_staff_id.to_string(),
+            created_at: std::time::Instant::now(),
             state: PMutex::new(CardState::default()),
-        }))
+        });
+
+        // 投递后立刻推一帧"思考中"，避免卡片空白等待（与 Python 版 set_context 一致）。
+        card.push_streaming(false).await;
+
+        Ok(card)
     }
 
     /// 接收一段 thinking 增量——只保留最后一行（与 Python 版一致）。
@@ -224,27 +249,38 @@ impl CardReplier {
     }
 
     /// 任务完成：关流 + 覆盖 cardData 为最终回复。
-    pub async fn finalize(&self, reply: &str) {
+    ///
+    /// 返回 `Err` 时调用方应 fallback 到纯文本回复，避免用户什么都收不到。
+    pub async fn finalize(&self, reply: &str) -> Result<(), String> {
         {
             let mut s = self.state.lock();
             if s.finalized {
-                return;
+                return Ok(());
             }
             s.finalized = true;
         }
         // 关流：发一次 isFinalize=true 的空内容。
-        let _ = self
+        if let Err(e) = self
             .stream_put(EMPTY_PLACEHOLDER, /*is_full*/ false, /*is_final*/ true)
-            .await;
+            .await
+        {
+            warn!(error = %e, "AI card finalize: stream close failed");
+        }
+        // reply 由调用方（bot.rs）已拼好 header + 正文 + footer，不再重复拼 self.header。
         let final_content = if reply.trim().is_empty() {
-            format!("{}\n\n（无输出）", self.header)
+            format!("{}（无输出）", self.header)
         } else {
-            format!("{}\n\n{}", self.header, reply)
+            reply.to_string()
         };
-        // 覆盖 cardData 为最终状态。
-        let _ = self
-            .update_card_data(&final_content, STATUS_FINISHED)
-            .await;
+        // 覆盖 cardData 为最终状态：结果写入 result，flowStatus 设为完成。
+        self.update_card_data(&final_content)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "AI card finalize: update cardData failed");
+                e
+            })?;
+        info!(track_id = %self.out_track_id, "AI card finalized");
+        Ok(())
     }
 
     /// 用户停止：在当前内容尾部追加"已终止"提示并关闭。
@@ -260,7 +296,7 @@ impl CardReplier {
             .stream_put(EMPTY_PLACEHOLDER, false, true)
             .await;
         let body = self.render_body_with_suffix("\n\n⏹ 任务已被手动终止，如需继续请重新提问。");
-        let _ = self.update_card_data(&body, STATUS_FINISHED).await;
+        let _ = self.update_card_data(&body).await;
     }
 
     /// 把当前状态渲染成 markdown 并推一条 streaming 更新。
@@ -314,6 +350,12 @@ impl CardReplier {
             "isFinalize": is_finalize,
             "isError": false,
         });
+        debug!(
+            track_id = %self.out_track_id,
+            is_finalize,
+            content_len = content.len(),
+            "AI card stream_put"
+        );
         let resp = self
             .http
             .put(API_STREAMING)
@@ -332,7 +374,7 @@ impl CardReplier {
     }
 
     /// PUT /v1.0/card/instances —— 覆盖整个 cardData（最终态）。
-    async fn update_card_data(&self, content: &str, flow_status: &str) -> Result<(), String> {
+    async fn update_card_data(&self, result: &str) -> Result<(), String> {
         let token = self
             .token_manager
             .get_token()
@@ -342,11 +384,16 @@ impl CardReplier {
             "outTrackId": self.out_track_id,
             "cardData": {
                 "cardParamMap": {
-                    CONTENT_KEY: content,
-                    FLOW_STATUS_KEY: flow_status,
+                    FLOW_STATUS_KEY: FLOW_STATUS_FINISHED,
+                    RESULT_KEY: result,
                 }
             }
         });
+        debug!(
+            track_id = %self.out_track_id,
+            payload = %payload,
+            "AI card update_card_data request"
+        );
         let resp = self
             .http
             .put(API_UPDATE)
@@ -357,10 +404,11 @@ impl CardReplier {
             .await
             .map_err(|e| format!("update network: {e}"))?;
         let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
             return Err(format!("update HTTP {status}: {body}"));
         }
+        debug!(track_id = %self.out_track_id, response = %body, "AI card update_card_data response");
         Ok(())
     }
 
@@ -401,6 +449,33 @@ pub fn register_card(registry: &AiCardRegistry, chat_id: &str, card: Arc<CardRep
 /// 注销——任务完成/终止后调用。返回被移除的 replier（若有）。
 pub fn unregister_card(registry: &AiCardRegistry, chat_id: &str) -> Option<Arc<CardReplier>> {
     registry.lock().remove(chat_id)
+}
+
+/// 清理超时未 finalize 的卡片。返回被清理的数量。
+///
+/// 由外部定时调用（如 outbound dispatcher 循环里、或独立 tokio::spawn）。
+/// 超过 `CARD_TTL_SECS` 未 finalize 的卡片会被 terminate + unregister。
+pub async fn reap_stale_cards(registry: &AiCardRegistry) -> usize {
+    let stale: Vec<(String, Arc<CardReplier>)> = {
+        let guard = registry.lock();
+        guard
+            .iter()
+            .filter(|(_, card)| card.created_at.elapsed().as_secs() > CARD_TTL_SECS)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    let count = stale.len();
+    for (chat_id, card) in stale {
+        warn!(
+            chat_id = %chat_id,
+            track_id = %card.out_track_id(),
+            age_secs = card.created_at.elapsed().as_secs(),
+            "Reaping stale AI card"
+        );
+        card.terminate().await;
+        registry.lock().remove(&chat_id);
+    }
+    count
 }
 
 /// 反查：根据 outTrackId 找到 (chat_id, replier)。活跃卡片数通常很少（每会话最多一张），

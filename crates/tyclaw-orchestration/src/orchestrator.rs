@@ -106,22 +106,11 @@ impl Orchestrator {
         token
     }
 
-    /// 任务结束时清理令牌——只有当前保存的仍是自己这条（token 同一实例）才删。
-    pub(crate) fn clear_cancellation(
-        &self,
-        workspace_key: &str,
-        token: &tokio_util::sync::CancellationToken,
-    ) {
-        let mut map = self.cancellations.lock();
-        if let Some(existing) = map.get(workspace_key) {
-            if std::ptr::eq(
-                existing as *const _,
-                token as *const _,
-            ) || existing.is_cancelled() == token.is_cancelled()
-            {
-                map.remove(workspace_key);
-            }
-        }
+    /// 任务结束时清理令牌。
+    ///
+    /// per-workspace 锁保证同一时间只有一个任务在跑，所以直接 remove 即可。
+    pub(crate) fn clear_cancellation(&self, workspace_key: &str) {
+        self.cancellations.lock().remove(workspace_key);
     }
 
     /// 外部入口：中断指定 workspace 正在运行的 agent 任务。
