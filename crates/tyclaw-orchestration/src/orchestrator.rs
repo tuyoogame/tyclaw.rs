@@ -54,6 +54,11 @@ pub struct Orchestrator {
     /// Per-workspace 消息注入队列：workspace busy 时，新消息注入到运行中的 agent loop。
     pub(crate) injection_queues:
         parking_lot::Mutex<HashMap<String, tyclaw_agent::runtime::InjectionQueue>>,
+    /// Per-workspace 取消令牌：外部（钉钉停止按钮 / 关键字 / SIGINT 等）据此中断
+    /// 正在运行的 agent loop。handler 开始处理时注册、完成时移除。
+    pub(crate) cancellations: parking_lot::Mutex<
+        HashMap<String, tokio_util::sync::CancellationToken>,
+    >,
 }
 
 /// 活跃任务条目
@@ -83,6 +88,76 @@ impl Orchestrator {
         }))
         .unwrap_or_default();
         let _ = std::fs::write(self.app.workspace.join(".active_tasks.json"), content);
+    }
+
+    /// 注册一个取消令牌，与 `workspace_key` 关联。handler 进入时调用。
+    ///
+    /// 若同 workspace 已有令牌（典型情况：上一条消息还没跑完新消息又来了），
+    /// 旧令牌会被覆盖丢弃——其对应的任务会失去被外部 cancel 的能力，
+    /// 但 per-workspace 锁保证不会同时运行两个任务，所以覆盖是安全的。
+    pub(crate) fn register_cancellation(
+        &self,
+        workspace_key: &str,
+    ) -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        self.cancellations
+            .lock()
+            .insert(workspace_key.to_string(), token.clone());
+        token
+    }
+
+    /// 任务结束时清理令牌——只有当前保存的仍是自己这条（token 同一实例）才删。
+    pub(crate) fn clear_cancellation(
+        &self,
+        workspace_key: &str,
+        token: &tokio_util::sync::CancellationToken,
+    ) {
+        let mut map = self.cancellations.lock();
+        if let Some(existing) = map.get(workspace_key) {
+            if std::ptr::eq(
+                existing as *const _,
+                token as *const _,
+            ) || existing.is_cancelled() == token.is_cancelled()
+            {
+                map.remove(workspace_key);
+            }
+        }
+    }
+
+    /// 外部入口：中断指定 workspace 正在运行的 agent 任务。
+    ///
+    /// 返回 `true` 表示找到了正在运行的任务并已触发 cancel；`false` 表示当前
+    /// 没有运行中的任务（已结束或未开始）。
+    pub fn cancel(&self, workspace_key: &str) -> bool {
+        let map = self.cancellations.lock();
+        if let Some(token) = map.get(workspace_key) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 外部入口：按请求身份（用户 / 通道 / 会话）解析 workspace_key 后取消。
+    ///
+    /// 钉钉关键字 / 卡片停止按钮用这个——它们持有的是 staff_id、channel、chat_id，
+    /// 不知道内部的 workspace_key 是怎么拼出来的。这里走 WorkspaceManager 的
+    /// resolve_key 策略，保证和 handler 进入时用的 key 完全一致。
+    pub fn cancel_for_identity(
+        &self,
+        user_id: &str,
+        channel: &str,
+        chat_id: &str,
+        conversation_id: Option<&str>,
+    ) -> bool {
+        let identity = tyclaw_control::RequestIdentity {
+            user_id,
+            channel,
+            chat_id,
+            conversation_id,
+        };
+        let workspace_key = self.persistence.workspace_mgr.resolve_key(&identity);
+        self.cancel(&workspace_key)
     }
 
     /// 获取或创建指定 workspace 的注入队列。

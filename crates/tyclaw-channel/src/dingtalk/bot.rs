@@ -7,38 +7,88 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-use tyclaw_orchestration::{BusHandle, InboundMessage};
+use tyclaw_orchestration::{BusHandle, InboundMessage, Orchestrator};
 
+use super::ai_card::{self, AiCardRegistry, CardReplier};
 use super::credential::TokenManager;
 use super::handler::{self, ChatbotHandler};
 use super::message::{CallbackMessage, ChatbotMessage};
 
 const CLEAR_KEYWORDS: &[&str] = &["新话题", "/new"];
 
+/// 终止当前任务的关键字。用户发这些中任一条消息都会触发 cancel。
+const CANCEL_KEYWORDS: &[&str] = &[
+    "终止", "停止", "终止任务", "停止任务", "暂停", "stop", "cancel", "/stop", "/cancel",
+];
+
 pub struct DingTalkBot {
     bus_handle: BusHandle,
+    orchestrator: Arc<Orchestrator>,
     token_manager: TokenManager,
     http_client: Client,
     robot_code: String,
     workspace_root: PathBuf,
+    /// 钉钉 AI 卡片模板 id。`None` 时走纯文本回复、不启用卡片动画。
+    card_template_id: Option<String>,
+    /// 共享的卡片注册表（供 outbound dispatcher 查找同一 chat_id 的 replier）。
+    card_registry: AiCardRegistry,
 }
 
 impl DingTalkBot {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         bus_handle: BusHandle,
+        orchestrator: Arc<Orchestrator>,
         token_manager: TokenManager,
         robot_code: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
+        card_template_id: Option<String>,
+        card_registry: AiCardRegistry,
     ) -> Arc<Self> {
         let robot_code_str: String = robot_code.into();
         let workspace_root: PathBuf = workspace_root.into();
         Arc::new(Self {
             bus_handle,
+            orchestrator,
             token_manager,
             http_client: Client::new(),
             robot_code: robot_code_str,
             workspace_root,
+            card_template_id,
+            card_registry,
         })
+    }
+
+    /// 根据当前消息尝试创建 AI 卡片。
+    /// 模板未配置或创建失败时返回 `None`——调用方据此决定是否回退到纯文本。
+    async fn try_create_card(
+        &self,
+        question: &str,
+        nick: &str,
+        staff_id: &str,
+        conversation_id: &str,
+        is_private: bool,
+    ) -> Option<Arc<CardReplier>> {
+        let template_id = self.card_template_id.as_deref()?;
+        let header = format!("**{nick}:** {question}");
+        match CardReplier::create(
+            self.http_client.clone(),
+            self.token_manager.clone(),
+            self.robot_code.clone(),
+            template_id,
+            header,
+            conversation_id,
+            staff_id,
+            is_private,
+        )
+        .await
+        {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to create AI card, falling back to text");
+                None
+            }
+        }
     }
 }
 
@@ -85,12 +135,33 @@ impl ChatbotHandler for DingTalkBot {
         };
 
         let clear_keywords: HashSet<&str> = CLEAR_KEYWORDS.iter().copied().collect();
+        let cancel_keywords: HashSet<&str> =
+            CANCEL_KEYWORDS.iter().map(|k| *k).collect();
 
         let conv_id = if message.conversation_id.is_empty() {
             None
         } else {
             Some(message.conversation_id.clone())
         };
+
+        // 关键字拦截：终止任务。由 Orchestrator 内部解析 workspace_key，
+        // 避免外部重复 key 策略。
+        let trimmed_q = question.trim().to_lowercase();
+        if cancel_keywords.contains(trimmed_q.as_str()) {
+            let cancelled = self.orchestrator.cancel_for_identity(
+                &staff_id,
+                channel,
+                &chat_id,
+                conv_id.as_deref(),
+            );
+            let reply = if cancelled {
+                "⏹ 已请求终止当前任务，正在收尾..."
+            } else {
+                "当前没有正在运行的任务。"
+            };
+            handler::reply_text(&self.http_client, reply, &message).await;
+            return (200, "OK".into());
+        }
 
         if clear_keywords.contains(question.as_str()) {
             let msg = InboundMessage {
@@ -126,11 +197,36 @@ impl ChatbotHandler for DingTalkBot {
             return (200, "OK".into());
         }
 
-        // 在用户原始消息上贴表情气泡（emotion API）
-        let emotion_attached = if let Ok(token) = self.token_manager.get_token().await {
-            handler::emotion_reply(
-                &self.http_client, &token, &self.robot_code, &message, "🦀收到...",
-            ).await
+        // 尝试创建 AI 卡片。成功则注册到 registry（outbound dispatcher 据此 feed 进度），
+        // 失败或未配置模板都返回 None，走老的纯文本路径。
+        let card = self
+            .try_create_card(
+                &question,
+                &nick,
+                &staff_id,
+                &message.conversation_id,
+                message.is_private(),
+            )
+            .await;
+        if let Some(ref c) = card {
+            ai_card::register_card(&self.card_registry, &chat_id, Arc::clone(c));
+        }
+
+        // 只在没有卡片的降级路径上贴"收到..."表情气泡——卡片的"思考中"动画
+        // 已经充当了同样的"我在干活"提示。
+        let emotion_attached = if card.is_none() {
+            if let Ok(token) = self.token_manager.get_token().await {
+                handler::emotion_reply(
+                    &self.http_client,
+                    &token,
+                    &self.robot_code,
+                    &message,
+                    "🦀收到...",
+                )
+                .await
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -250,21 +346,31 @@ impl ChatbotHandler for DingTalkBot {
                 };
                 let formatted = format!("{header}\n\n{reply_text}\n\n{footer}");
 
-                let sent =
-                    handler::reply_markdown(&self.http_client, "执行结果", &formatted, &message)
-                        .await;
+                if let Some(ref c) = card {
+                    // 有卡片：写入最终态，不再发新消息。注销 registry 防止后续事件误投。
+                    ai_card::unregister_card(&self.card_registry, &chat_id);
+                    c.finalize(&formatted).await;
+                } else {
+                    let sent = handler::reply_markdown(
+                        &self.http_client,
+                        "执行结果",
+                        &formatted,
+                        &message,
+                    )
+                    .await;
 
-                if !sent {
-                    warn!("DingTalk: webhook failed, falling back to proactive API");
-                    if let Ok(token) = self.token_manager.get_token().await {
-                        handler::send_text_proactive(
-                            &self.http_client,
-                            &token,
-                            &self.robot_code,
-                            &message,
-                            &reply_text,
-                        )
-                        .await;
+                    if !sent {
+                        warn!("DingTalk: webhook failed, falling back to proactive API");
+                        if let Ok(token) = self.token_manager.get_token().await {
+                            handler::send_text_proactive(
+                                &self.http_client,
+                                &token,
+                                &self.robot_code,
+                                &message,
+                                &reply_text,
+                            )
+                            .await;
+                        }
                     }
                 }
 
@@ -341,8 +447,17 @@ impl ChatbotHandler for DingTalkBot {
             }
             Err(e) => {
                 error!(sender = %nick, error = %e, "DingTalk: orchestrator error");
-                handler::reply_text(&self.http_client, "处理过程出错，请联系管理员。", &message)
+                if let Some(ref c) = card {
+                    ai_card::unregister_card(&self.card_registry, &chat_id);
+                    c.terminate().await;
+                } else {
+                    handler::reply_text(
+                        &self.http_client,
+                        "处理过程出错，请联系管理员。",
+                        &message,
+                    )
                     .await;
+                }
             }
         }
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use super::service::TimerService;
 use super::types::TimerSchedule;
-use crate::base::{RiskLevel, Tool};
+use crate::base::{brief_truncate, RiskLevel, Tool};
 
 pub struct TimerTool {
     service: Arc<TimerService>,
@@ -269,6 +269,20 @@ impl Tool for TimerTool {
          - Repeating every N seconds → use `every_seconds` (must be > 0). Do NOT set tz together.\n\
          Exactly ONE of [at, delay_seconds, cron_expr, every_seconds] must be provided. Do NOT mix them.\n\
          Omit fields that are not needed — do not pass 0 as a placeholder."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+            Some(format!("timer {action}: {}", brief_truncate(name, 40)))
+        } else if let Some(msg) = args.get("message").and_then(|v| v.as_str()) {
+            Some(format!("timer {action}: {}", brief_truncate(msg, 40)))
+        } else {
+            Some(format!("timer {action}"))
+        }
     }
 
     fn parameters(&self) -> Value {

@@ -7,6 +7,7 @@
 //! - `stream`: WebSocket stream 客户端
 //! - `bot`: 编排器适配层（把消息交给 Orchestrator）
 
+pub mod ai_card;
 pub mod bot;
 pub mod credential;
 pub mod gateway;
@@ -14,6 +15,9 @@ pub mod handler;
 pub mod message;
 pub mod stream;
 
+pub use ai_card::{
+    new_card_registry, AiCardCallbackHandler, AiCardRegistry, CardReplier, CARD_CALLBACK_TOPIC,
+};
 pub use bot::DingTalkBot;
 pub use credential::{Credential, TokenManager};
 pub use gateway::GatewayClient;

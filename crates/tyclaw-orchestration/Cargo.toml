@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
 uuid = { workspace = true }

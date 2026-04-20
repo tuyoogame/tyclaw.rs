@@ -91,6 +91,29 @@ pub trait Tool: Send + Sync {
     fn compress_output(&self, output: &str, _params: &HashMap<String, Value>) -> String {
         output.to_string()
     }
+
+    /// 给 UI（钉钉卡片思考/工具行）用的简短描述。
+    ///
+    /// 传入工具的原始调用参数（`tool_call.arguments`），返回人类可读的一行。
+    /// 默认返回 `None`，具体工具可按需实现：`exec` 截断命令、`read_file` 只留 basename 等。
+    fn brief(&self, _args: &HashMap<String, Value>) -> Option<String> {
+        None
+    }
+}
+
+/// brief 辅助：按字符（非字节）边界截断字符串，UTF-8 安全。
+pub fn brief_truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{truncated}…")
+    }
+}
+
+/// brief 辅助：路径只留最后一段（basename）。
+pub fn brief_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// 根据 JSON Schema 中声明的属性类型，自动转换参数类型。

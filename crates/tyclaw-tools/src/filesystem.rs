@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 
 use tyclaw_tool_abi::{Sandbox, SandboxFileStat, SandboxWalkEntry};
 
-use crate::base::{RiskLevel, Tool};
+use crate::base::{brief_basename, RiskLevel, Tool};
 
 /// 读取文件的最大字符数限制。
 /// 超过此限制的内容会被截断，并附加截断提示。
@@ -244,6 +244,11 @@ impl Tool for ReadFileTool {
          Always use this before editing a file, and prefer this over exec cat/head/tail."
     }
 
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = args.get("path").and_then(|v| v.as_str())?;
+        Some(format!("read: {}", brief_basename(path)))
+    }
+
     /// read_file 输出压缩：合并连续空行，大文件时去掉纯注释块
     fn compress_output(&self, output: &str, params: &HashMap<String, Value>) -> String {
         let lines: Vec<&str> = output.lines().collect();
@@ -428,6 +433,11 @@ impl Tool for WriteFileTool {
          Prefer this for new files or full rewrites; prefer edit_file or apply_patch for targeted changes."
     }
 
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = args.get("path").and_then(|v| v.as_str())?;
+        Some(format!("write: {}", brief_basename(path)))
+    }
+
     /// 参数 Schema：需要 path（文件路径）和 content（写入内容）
     fn parameters(&self) -> Value {
         json!({
@@ -540,6 +550,11 @@ impl Tool for EditFileTool {
     fn description(&self) -> &str {
         "Edit a file by replacing old_text with new_text. Use this for one localized change or one exact replacement. \
          Set replace_all=true to replace all occurrences (e.g. renaming a variable). Prefer apply_patch for multiple hunks."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = args.get("path").and_then(|v| v.as_str())?;
+        Some(format!("edit: {}", brief_basename(path)))
     }
 
     /// 参数 Schema：需要 path、old_text、new_text，可选 replace_all
@@ -720,6 +735,11 @@ impl Tool for DeleteFileTool {
     fn description(&self) -> &str {
         "Delete a single file inside the workspace. Use this for explicit file removal instead of exec rm. \
          Do not use it for directories."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = args.get("path").and_then(|v| v.as_str())?;
+        Some(format!("delete: {}", brief_basename(path)))
     }
 
     fn parameters(&self) -> Value {
@@ -912,6 +932,11 @@ impl Tool for ApplyPatchTool {
         "Apply multiple targeted patch operations to one existing file. Supports replace, insert_before, \
          insert_after, and delete actions anchored on exact text. Use this for multi-step or multi-hunk edits \
          when edit_file would require several sequential replacements. Prefer edit_file for a single localized change."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = args.get("path").and_then(|v| v.as_str())?;
+        Some(format!("patch: {}", brief_basename(path)))
     }
 
     fn parameters(&self) -> Value {
@@ -1193,6 +1218,11 @@ impl Tool for ListDirTool {
          for finding files by name or path pattern, prefer glob."
     }
 
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        Some(format!("list: {path}"))
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -1398,6 +1428,11 @@ impl Tool for SendFileTool {
     fn description(&self) -> &str {
         "Send a file to the user. The file will be delivered through the current channel (e.g., DingTalk). \
          Use this after creating a file with write_file when you want the user to receive it as a downloadable attachment."
+    }
+
+    fn brief(&self, args: &HashMap<String, Value>) -> Option<String> {
+        let path = args.get("path").and_then(|v| v.as_str())?;
+        Some(format!("send: {}", brief_basename(path)))
     }
 
     fn parameters(&self) -> Value {
