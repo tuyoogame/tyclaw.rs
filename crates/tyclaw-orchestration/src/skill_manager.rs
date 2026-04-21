@@ -462,8 +462,8 @@ mod tests {
         let mgr = SkillManager::new(builtin_dir, ws_root.clone());
         let skills = mgr.scan_builtin();
 
-        // 验证全部 Skill 被扫描到
-        assert_eq!(skills.len(), 21, "expected 21 skills, got {}: {:?}",
+        // 验证所有 Skill 被扫描到（数量随迁移变化，至少 25 个）
+        assert!(skills.len() >= 25, "expected at least 25 skills, got {}: {:?}",
             skills.len(), skills.iter().map(|s| &s.key).collect::<Vec<_>>());
 
         // 验证 5 个 category
