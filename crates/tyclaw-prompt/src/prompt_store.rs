@@ -66,6 +66,14 @@ pub fn get(key: &str) -> String {
     substitute_vars(&value)
 }
 
+/// 获取顶层字段，未初始化或未配置时返回 `None`——适合可选护栏类文本，
+/// 不希望在不完整环境（如单元测试）下 panic。
+pub fn try_get(key: &str) -> Option<String> {
+    let store = STORE.get()?;
+    let value = store.top.get(key).filter(|v| !v.is_empty()).cloned()?;
+    Some(substitute_vars(&value))
+}
+
 /// 获取 node_types.{type} 的提示词。
 pub fn get_node_type(node_type: &str) -> String {
     let store = STORE

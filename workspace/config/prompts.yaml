@@ -842,10 +842,28 @@ nudges:
   explore_budget_warning: |
     [System] 探索预算即将耗尽（{current}/{max}）。停止继续探索，立即开始产出——调用 write_file、edit_file 或 dispatch_subtasks。
 
+  # LLM 一轮就 finish_reason=stop 且无 tool_calls、content 又是"我来给你查/请稍等"
+  # 这类承诺时注入，强制下一轮真调工具或明确说明做不了。仅触发 1 次防死循环。
+  empty_promise_retry: |
+    [System] 你刚才只输出了文字承诺（如"我现在开始查询 / 请稍等 / I'll fetch..."），但没有调用任何工具——对用户来说这等同于什么都没做。
+    现在请立即执行以下二选一：
+    (A) 直接调用合适的工具开始执行（web_search / web_fetch / exec / dispatch_subtasks / read_file / grep_search 等），不要再写任何"稍等"或"我会"；
+    (B) 如果当前工具链确实无法完成这项任务，向用户明确说明具体缺失什么（如需要哪个 API 凭证、哪个 skill 未安装），不要再用"请稍等"之类的模糊承诺搪塞。
+    不允许再返回一条类似的纯承诺文本。
+
 
 # ============================================================================
 # 第四部分：内联模板文本（代码中引用，统一外置管理）
 # ============================================================================
+
+# Long-term Memory 块前的"解读规则"护栏。
+# 用于防止 LLM 把"上次承诺但没做完"（记忆里的 "acknowledged / stated it would ... /
+# no results yet"）误读成"当前正在做"而继续输出承诺——陷入自我强化循环。
+# 注入位置：memory_store 在 `## Long-term Memory` 标题之前拼入此段。
+memory_guard: |
+  > **Memory 解读规则**：下面的条目只是历史快照，不是当前任务的状态。
+  > 若条目含 "assistant acknowledged / stated it would ... / no results yet" 这类措辞，意味着那次任务**未完成**，绝不等同于"正在做"或"已经答应过不用再做"。
+  > 当前任务永远以 `# Current Task Focus` 为准——需要实时数据或执行动作时必须调工具，不要再返回"我来给你查 / 请稍等 / I'll fetch..."这种纯文字承诺。
 
 # dispatch 单节点结果返回给主控的提示
 dispatch_single_result_hint: |

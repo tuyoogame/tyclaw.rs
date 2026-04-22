@@ -52,12 +52,20 @@ impl MemoryStore {
     }
 
     /// 获取记忆上下文（用于注入系统提示）。
+    ///
+    /// 在 Long-term Memory 顶部加一段解读规则（护栏），防止 LLM 把"上次承诺但没做完"
+    /// 误读成"当前正在做"从而继续输出承诺——典型失败模式：memory 里有
+    /// "assistant acknowledged ... no results yet"，LLM 读到后这一轮又发"我来给你查"
+    /// 然后 stop，没有任何 tool call，陷入自我强化循环。
+    ///
+    /// 护栏文本从 `prompts.yaml` 的 `memory_guard` 字段加载（需先 `init()` prompt_store）。
     pub fn get_memory_context(&self) -> String {
         let long_term = self.read_long_term();
         if long_term.is_empty() {
             String::new()
         } else {
-            format!("## Long-term Memory\n{}", long_term)
+            let guard = tyclaw_prompt::nudge_loader::memory_guard();
+            format!("{guard}\n## Long-term Memory\n{long_term}")
         }
     }
 

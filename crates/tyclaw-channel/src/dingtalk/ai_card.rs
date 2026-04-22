@@ -43,13 +43,18 @@ const API_UPDATE: &str = "https://api.dingtalk.com/v1.0/card/instances";
 /// 卡片模板变量 key（需与钉钉后台模板一致）。
 const CONTENT_KEY: &str = "content";
 const RESULT_KEY: &str = "result";
+/// `progress`（0-100 百分比）是 AI 卡片可选模板变量。当前模板暂未使用，
+/// 保留常量待后续模板升级后直接启用。
+#[allow(dead_code)]
 const PROGRESS_KEY: &str = "progress";
 /// flowStatus 是钉钉 AI 卡片组件的内置状态字段，控制"输出中"/"完成"状态切换。
 const FLOW_STATUS_KEY: &str = "flowStatus";
 /// flowStatus: 1=处理中，3=完成（与 Python 版一致）
 const FLOW_STATUS_PROCESSING: &str = "1";
 const FLOW_STATUS_FINISHED: &str = "3";
+#[allow(dead_code)]
 const PROGRESS_PROCESSING: &str = "0";
+#[allow(dead_code)]
 const PROGRESS_FINISHED: &str = "100";
 
 /// 占位空内容——钉钉卡片空字符串会报错，用零宽空格兜底。
@@ -114,8 +119,6 @@ impl CardReplier {
             .get_token()
             .await
             .map_err(|e| format!("get_token failed: {e}"))?;
-
-        let initial_content = format!("{header}🔍 思考中");
 
         // 1) 创建卡片实例。
         // 必须声明 imRobotOpenSpaceModel / imGroupOpenSpaceModel，
