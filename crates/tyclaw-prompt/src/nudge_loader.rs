@@ -22,6 +22,18 @@ pub fn param_error_retry() -> String {
     crate::prompt_store::get_nudge("param_error_retry")
 }
 
+pub fn empty_promise_retry() -> String {
+    crate::prompt_store::get_nudge("empty_promise_retry")
+}
+
+/// Long-term Memory 块前的护栏文本（顶层 prompts.yaml 字段）。
+///
+/// 配置缺失或 prompt_store 未 init 时静默返回空串——单元测试或老配置文件
+/// 升级前的兼容场景不希望 panic。
+pub fn memory_guard() -> String {
+    crate::prompt_store::try_get("memory_guard").unwrap_or_default()
+}
+
 pub fn explore_budget_warning(current: usize, max: usize) -> String {
     let template = crate::prompt_store::get_nudge("explore_budget_warning");
     template

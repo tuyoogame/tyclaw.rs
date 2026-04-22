@@ -37,6 +37,52 @@ use crate::runtime::{
 
 /// 外部请求取消时 agent loop 返回给用户的内容。
 const CANCELLED_REPLY: &str = "⏹ 任务已被手动终止。";
+
+/// 判断 LLM 的文本回复是不是"只承诺不做事"——匹配中英文常见承诺短语。
+///
+/// 只有在整条回复很短（< 400 字符）且命中明显承诺词且没有可交付内容时才算空承诺，
+/// 避免把真正包含数据的回复误杀。
+fn is_empty_promise(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 400 {
+        return false;
+    }
+    // 太短但看起来像"做完了 / 给出结论"的回复放过（字数限定在 400 以内已经排除长结论）。
+    let t = trimmed.to_lowercase();
+    // 常见的"我要做 / 马上做 / 现在开始 / 请稍等"承诺词。
+    const PROMISE_PATTERNS: &[&str] = &[
+        // 中文
+        "请稍等",
+        "稍等",
+        "马上",
+        "我来给你查",
+        "我来帮你查",
+        "我来查",
+        "我现在开始",
+        "现在开始查询",
+        "开始查询",
+        "我会帮你",
+        "我将返回",
+        "我将给",
+        "我将为你",
+        "我将开始",
+        "我来处理",
+        "我马上",
+        "让我来",
+        // 英文
+        "i'll fetch",
+        "i will fetch",
+        "i'll query",
+        "i will query",
+        "i'll get",
+        "let me fetch",
+        "let me query",
+        "one moment",
+        "hold on",
+        "please wait",
+    ];
+    PROMISE_PATTERNS.iter().any(|p| t.contains(p))
+}
 use tyclaw_prompt::ContextBuilder;
 
 /// ReAct 循环引擎 —— 迭代式 LLM 调用 + 工具执行。
@@ -102,6 +148,8 @@ impl AgentRuntime for AgentLoop {
         let mut last_batch_sig: Option<String> = None;
         let mut repeated_batches: usize = 0;
         let mut no_progress_rounds: usize = 0;
+        // 已经注入过多少次"空承诺"催促。上限防止死循环（LLM 真的无法完成时也得让它退出）。
+        let mut empty_promise_retries: usize = 0;
         let mut cumulative_output_chars: usize = 0;
         let goal = latest_user_goal(&messages);
         let mut ctx_state = ContextManager::new(goal.clone());
@@ -804,6 +852,35 @@ impl AgentRuntime for AgentLoop {
                         "system",
                         &crate::nudge_loader::param_error_retry(),
                     ));
+                    continue;
+                }
+
+                // 空承诺检测：LLM 一轮就 finish_reason=stop，没调任何工具，content 又是
+                // "我现在开始查询 / 请稍等 / I'll fetch ..." 这种承诺式文本——等同于欺骗用户。
+                // 注入一条 system nudge 逼它下一轮真的调工具或明确说明做不了。
+                // 仅在 session 至今没用过任何工具、且承诺次数未达上限时触发。
+                let promise_text = clean.as_deref().unwrap_or("");
+                if tools_used.is_empty()
+                    && empty_promise_retries < 1
+                    && total_iterations < self.max_iterations.saturating_sub(2)
+                    && is_empty_promise(promise_text)
+                {
+                    warn!(
+                        empty_promise_retries,
+                        content_preview = %build_decision_preview(promise_text),
+                        "LLM stopped with a promise-shaped reply but no tool calls — nudging to act"
+                    );
+                    ContextBuilder::add_assistant_message(
+                        &mut messages,
+                        clean.as_deref(),
+                        None,
+                        response.reasoning_content.as_deref(),
+                    );
+                    messages.push(chat_message(
+                        "system",
+                        &crate::nudge_loader::empty_promise_retry(),
+                    ));
+                    empty_promise_retries += 1;
                     continue;
                 }
 

@@ -875,6 +875,33 @@ impl OpenAICompatProvider {
 
         let content = raw_content;
 
+        // 诊断日志：把最终聚合的 response 内容落盘（截断前 500 字），便于排查
+        // "LLM 说要做却没调工具" 这类空承诺型回复。log_level=debug 可见。
+        {
+            let content_preview: String = content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(500)
+                .collect();
+            let reasoning_preview: String = reasoning_content
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect();
+            debug!(
+                target: "llm.response",
+                model = %self.default_model,
+                content_len = content.as_deref().map(|s| s.len()).unwrap_or(0),
+                reasoning_len = reasoning_content.as_deref().map(|s| s.len()).unwrap_or(0),
+                tool_call_count = tool_calls.len(),
+                content_preview = %content_preview,
+                reasoning_preview = %reasoning_preview,
+                "LLM aggregated response (SSE)"
+            );
+        }
+
         Ok(LLMResponse {
             content,
             tool_calls,
