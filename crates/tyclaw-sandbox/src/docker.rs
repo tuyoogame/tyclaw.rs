@@ -25,6 +25,9 @@ pub struct DockerConfig {
     pub cpus: String,
     pub network: String,
     pub work_dir: String,
+    /// 以宿主机用户的 UID:GID 运行容器，使 volume mount 创建的文件
+    /// 归属宿主机用户，reaper 可正常清理。
+    pub run_as_host_user: bool,
 }
 
 impl Default for DockerConfig {
@@ -35,6 +38,7 @@ impl Default for DockerConfig {
             cpus: "1".into(),
             network: "bridge".into(),
             work_dir: "/workspace".into(),
+            run_as_host_user: true,
         }
     }
 }
@@ -670,6 +674,7 @@ impl DockerPool {
 
         let tmpdir_env = format!("TMPDIR={}/work/tmp", self.config.work_dir);
         let tz_env = format!("TZ={}", detect_host_timezone());
+        let home_env = format!("HOME={}", self.config.work_dir);
 
         let mut run_args = vec![
             "run".to_string(),
@@ -692,7 +697,18 @@ impl DockerPool {
             tmpdir_env,
             "-e".into(),
             tz_env,
+            "-e".into(),
+            home_env,
         ];
+
+        if self.config.run_as_host_user {
+            let uid_gid = detect_host_uid_gid().await;
+            info!(uid_gid = %uid_gid, "Running container as host user");
+            run_args.extend([
+                "--user".to_string(),
+                uid_gid,
+            ]);
+        }
 
         // 挂载主机 /etc/localtime 使容器时区与主机一致（文件存在时才挂载）
         if Path::new("/etc/localtime").exists() {
@@ -857,6 +873,30 @@ impl SandboxPool for DockerPool {
 
 fn user_mount_root(_work_dir: &str) -> String {
     "/workspace".to_string()
+}
+
+/// 探测宿主机当前用户的 UID:GID，用于 `--user` 参数。
+/// 失败时回退到 1000:1000（常见 Linux 首个非 root 用户）。
+async fn detect_host_uid_gid() -> String {
+    let uid = Command::new("id")
+        .args(["-u"])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "1000".into());
+
+    let gid = Command::new("id")
+        .args(["-g"])
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "1000".into());
+
+    format!("{uid}:{gid}")
 }
 
 /// 探测主机时区，返回 IANA 时区名（如 "Asia/Shanghai"）。
