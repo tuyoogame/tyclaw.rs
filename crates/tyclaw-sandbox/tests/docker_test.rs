@@ -186,6 +186,43 @@ async fn test_docker_host_isolation() {
 }
 
 #[tokio::test]
+async fn test_docker_file_ownership() {
+    let config = DockerConfig::default();
+    assert!(config.run_as_host_user, "run_as_host_user should default to true");
+
+    let users_dir = temp_users_dir();
+    let pool = DockerPool::new(config, users_dir.clone())
+        .await
+        .expect("Pool creation failed");
+    let ws = user_workspace(&users_dir, "test_ownership");
+
+    let sandbox = pool.acquire(&ws, &[]).await.expect("Acquire failed");
+
+    sandbox
+        .write_file("owned.txt", b"host-deletable")
+        .await
+        .expect("Write failed");
+    sandbox
+        .exec("mkdir -p work/tmp/subdir && echo data > work/tmp/subdir/deep.txt", Duration::from_secs(5))
+        .await
+        .expect("Exec via shell failed");
+
+    pool.release(sandbox, &ws).await.expect("Release failed");
+
+    let host_file = ws.join("owned.txt");
+    assert!(host_file.exists(), "File should exist on host");
+    std::fs::remove_file(&host_file).expect("Host user should be able to delete container-created file");
+
+    let tmp_subdir = ws.join("tmp/subdir");
+    if tmp_subdir.exists() {
+        std::fs::remove_dir_all(&tmp_subdir)
+            .expect("Host user should be able to remove_dir_all container-created dirs");
+    }
+
+    cleanup(&users_dir);
+}
+
+#[tokio::test]
 async fn test_docker_exec_timeout() {
     let config = DockerConfig::default();
     let users_dir = temp_users_dir();
